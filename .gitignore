@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# Node / frontend
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Electron build output
+out/
+dist-electron/
+
+# Captured calibration frames (user data, not source)
+captures/
+
+# Calibration output files
+calibration.json
+calibration.xml
+calibration.exr
+calibration.ulens
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/settings.json
+.idea/
+*.suo
+*.user
+
+# Claude Code local config
+.claude/
+
+# Temp / reference files
+temp/

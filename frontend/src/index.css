@@ -1,0 +1,6 @@
+@import "tailwindcss";
+
+/* Hold-ring SVG arc — transition can't be expressed as Tailwind utilities */
+.hold-ring-arc {
+  transition: stroke-dasharray 0.1s linear, stroke 0.2s ease;
+}
