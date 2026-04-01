@@ -42,7 +42,8 @@ def run_calibration(
     if len(usable) < 3:
         return _error(
             f"Need at least 3 usable frames, got {len(usable)} "
-            f"({skipped} skipped as 'fail')"
+            f"({skipped} skipped as 'fail')",
+            squeeze_ratio,
         )
 
     # --- Object points (3-D grid, z = 0) ------------------------------------
@@ -67,7 +68,7 @@ def run_calibration(
         paths.append(frame.get("path", ""))
 
     if len(obj_points) < 3:
-        return _error("Not enough frames with the correct corner count after filtering")
+        return _error("Not enough frames with the correct corner count after filtering", squeeze_ratio)
 
     # --- Calibration --------------------------------------------------------
     calib_size = (int(image_size[0] * squeeze_ratio), image_size[1]) if squeeze_ratio > 1.0 else image_size
@@ -85,13 +86,21 @@ def run_calibration(
     per_image_errors = []
     for i, (obj, img, rvec, tvec) in enumerate(zip(obj_points, img_points, rvecs, tvecs)):
         projected, _ = cv2.projectPoints(obj, rvec, tvec, camera_matrix, dist_coeffs)
-        err = float(
-            np.sqrt(np.mean(np.sum((img.reshape(-1, 2) - projected.reshape(-1, 2)) ** 2, axis=1)))
-        )
+        diff = img.reshape(-1, 2) - projected.reshape(-1, 2)
+        sq_err = np.sum(diff ** 2, axis=1)
+        # Guard against NaN/Inf from degenerate pose estimates
+        if np.any(~np.isfinite(sq_err)):
+            err = float("inf")
+        else:
+            err = float(np.sqrt(np.mean(sq_err)))
         per_image_errors.append({"path": paths[i], "error": round(err, 4), "outlier": False})
 
-    mean_err = sum(e["error"] for e in per_image_errors) / len(per_image_errors)
-    outlier_threshold = mean_err * 1.5
+    # Use Tukey IQR method — robust against skewed distributions caused by one
+    # very bad frame dragging the mean up and masking all other outliers.
+    errors_arr = np.array([e["error"] for e in per_image_errors])
+    q1, q3 = float(np.percentile(errors_arr, 25)), float(np.percentile(errors_arr, 75))
+    iqr = q3 - q1
+    outlier_threshold = q3 + 1.5 * iqr if iqr > 0 else float(np.median(errors_arr)) * 2.0
     for entry in per_image_errors:
         entry["outlier"] = entry["error"] > outlier_threshold
 
@@ -127,7 +136,7 @@ def _confidence(rms: float) -> str:
     return "poor"
 
 
-def _error(reason: str) -> dict:
+def _error(reason: str, squeeze_ratio: float = 1.0) -> dict:
     return {
         "rms": None,
         "camera_matrix": None,
@@ -138,5 +147,7 @@ def _error(reason: str) -> dict:
         "confidence": "poor",
         "used_frames": 0,
         "skipped_frames": 0,
+        "squeeze_ratio": squeeze_ratio,
+        "lens_type": "anamorphic" if squeeze_ratio > 1.0 else "spherical",
         "error": reason,
     }

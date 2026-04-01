@@ -119,9 +119,13 @@ def run_zoom_calibration(
             )))
             pie.append({"path": paths[i], "error": round(err, 4), "outlier": False})
 
-        mean_err = sum(e["error"] for e in pie) / len(pie)
+        # IQR-based outlier detection (robust to skewed distributions)
+        pie_arr = np.array([e["error"] for e in pie])
+        q1, q3 = float(np.percentile(pie_arr, 25)), float(np.percentile(pie_arr, 75))
+        iqr = q3 - q1
+        pie_threshold = q3 + 1.5 * iqr if iqr > 0 else float(np.median(pie_arr)) * 2.0
         for entry in pie:
-            entry["outlier"] = entry["error"] > mean_err * 1.5
+            entry["outlier"] = entry["error"] > pie_threshold
 
         fl_results.append({
             "focal_length_mm":         fl_mm,
@@ -140,13 +144,22 @@ def run_zoom_calibration(
             "error":                   None,
         })
 
-    # ── Nodal offsets: Z-shift vs first valid FL ───────────────────────
+    # ── Nodal offsets: Z-shift vs the best-calibrated FL ──────────────
+    # Use the FL with the lowest RMS as the reference to minimise error
+    # propagation. Keys are formatted as integers or ".1f" floats so they
+    # match the lookup in export_ue5_ulens_zoom (which also uses str(fl_mm)).
     valid = [(i, c) for i, c in enumerate(optical_centers) if c is not None]
     nodal_offsets: dict[str, float] = {}
     if valid:
-        ref_z = float(valid[0][1][2])
+        # Pick the index with the best (lowest) RMS among valid calibrations
+        best_idx = min(
+            valid,
+            key=lambda v: fl_results[v[0]].get("rms") or float("inf"),
+        )[0]
+        ref_z = float(optical_centers[best_idx][2])
         for idx, center in valid:
-            key = str(fl_results[idx]["focal_length_mm"])
+            fl_mm = fl_results[idx]["focal_length_mm"]
+            key = str(int(fl_mm)) if fl_mm == int(fl_mm) else f"{fl_mm:.1f}"
             nodal_offsets[key] = round(float(center[2]) - ref_z, 2)
 
     return {

@@ -130,12 +130,10 @@ def export_stmap_exr(
             cm, dc, None, cm, (w_out, h), cv2.CV_32FC1
         )
 
-        # Normalize to 0–1 UV space (STmap convention)
-        # map_x is in de-squeezed pixel space; normalize to squeezed input 0-1
-        if squeeze_ratio > 1.0:
-            u = (map_x / squeeze_ratio / (w - 1)).astype(np.float32)
-        else:
-            u = (map_x / (w - 1)).astype(np.float32)
+        # Normalize to 0–1 UV space (STmap convention).
+        # map_x is in de-squeezed output pixel space (w_out wide); normalize
+        # across the full output width so U spans exactly [0, 1].
+        u = (map_x / max(w_out - 1, 1)).astype(np.float32)
         v = (map_y / (h - 1)).astype(np.float32)
         zeros = np.zeros((h, w_out), dtype=np.float32)
 
@@ -350,7 +348,9 @@ def export_ue5_ulens_zoom(
                 return float(dc[i]) if len(dc) > i else 0.0
 
             k1, k2, p1, p2, k3 = _d(0), _d(1), _d(2), _d(3), _d(4)
-            nz   = float(nodal_offsets_mm.get(str(fl_mm), 0.0))   # mm
+            # Key format must match zoom_calibrator.py: int when whole, ".1f" otherwise
+            _nz_key = str(int(fl_mm)) if fl_mm == int(fl_mm) else f"{fl_mm:.1f}"
+            nz   = float(nodal_offsets_mm.get(_nz_key, 0.0))   # mm
 
             fl_rows.append([focus_enc, ze(fl_mm), fx_n, fy_n])
             ic_rows.append([focus_enc, ze(fl_mm), cx_n, cy_n])

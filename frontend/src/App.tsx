@@ -109,7 +109,7 @@ export default function App() {
       setScanning(true);
       ws.send(JSON.stringify({ action: 'list_devices' }));
     }
-  }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [tab, ws, devices.length, scanning]);
 
   useEffect(() => {
     if (!ws) return;
@@ -176,7 +176,7 @@ export default function App() {
   const canCalibrate = includedFrames.filter(f => f.quality !== 'fail').length >= 3;
 
   const runCalibration = () => {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN || calibrating) return;
     // Store context so the calibrate_result handler picks the right imageSize/frames
     pendingImageSizeRef.current = imageSize;
     pendingFramesRef.current = includedFrames.map((f, i) => ({
@@ -350,7 +350,7 @@ export default function App() {
                   </span>
                   <span className="text-sm text-slate-200">{devices[0].name}</span>
                   {detectedW > 0 && (
-                    <span className="ml-auto text-xs text-slate-500">{detectedW}×{detectedH} · {detectedFps % 1 === 0 ? detectedFps : detectedFps.toFixed(2)} fps</span>
+                    <span className="ml-auto text-xs text-slate-500">{detectedW}×{detectedH} · {Math.abs(detectedFps - Math.round(detectedFps)) < 0.01 ? Math.round(detectedFps) : detectedFps.toFixed(2)} fps</span>
                   )}
                 </div>
               )}
