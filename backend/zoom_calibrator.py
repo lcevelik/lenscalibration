@@ -37,7 +37,7 @@ def run_zoom_calibration(
            optical_center_world:[x,y,z], used_frames,
            per_image_errors, confidence, error?}, ...
         ],
-        nodal_offsets_mm: {str(fl_mm): float, ...},   # Z-shift vs first valid FL
+        nodal_offsets_mm: {str(fl_mm): float, ...},   # Z-shift vs best-RMS FL
     }
     """
     objp = np.zeros((board_rows * board_cols, 3), dtype=np.float32)
@@ -161,8 +161,8 @@ def run_zoom_calibration(
         )[0]
         ref_z = float(optical_centers[best_idx][2])
         for idx, center in valid:
-            fl_mm = fl_results[idx]["focal_length_mm"]
-            key = str(int(fl_mm)) if fl_mm == int(fl_mm) else f"{fl_mm:.1f}"
+            fl_mm_val = fl_results[idx]["focal_length_mm"]
+            key = str(int(fl_mm_val)) if fl_mm_val == int(fl_mm_val) else f"{fl_mm_val:.1f}"
             nodal_offsets[key] = round(float(center[2]) - ref_z, 2)
 
     fl_interpolated = _interpolate_fl_table(fl_results, nodal_offsets)
@@ -252,8 +252,6 @@ def _interpolate_fl_table(fl_results: list[dict], nodal_offsets: dict[str, float
             [0.0, cam_fy, cam_cy],
             [0.0, 0.0, 1.0],
         ]
-        nz_key = _nz_key(fl)
-
         rows.append({
             "focal_length_mm":          fl,
             "rms":                       None,
