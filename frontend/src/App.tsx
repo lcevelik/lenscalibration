@@ -75,25 +75,61 @@ export default function App() {
   const pendingImageSizeRef = useRef<[number, number]>([1920, 1080]);
   const pendingFramesRef    = useRef<PreviewFrame[]>([]);
 
-  // Connect WebSocket
+  // Connect WebSocket with exponential-backoff reconnection.
+  // Attempt delays: 1 s, 2 s, 4 s, 8 s, capped at 16 s.
+  const wsPortRef = useRef<number>(8000);
   useEffect(() => {
     let cancelled = false;
-    let socket: WebSocket;
+    let socket: WebSocket | null = null;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let attempt = 0;
 
     async function connect() {
-      const port = window.electronAPI
-        ? await window.electronAPI.getBackendPort()
-        : 8000;
       if (cancelled) return;
-      setBackendPort(port);
-      socket = new WebSocket(`ws://127.0.0.1:${port}/ws`);
-      socket.onopen    = () => { setConnStatus('connected'); setWs(socket); };
-      socket.onclose   = () => setConnStatus('disconnected');
-      socket.onerror   = () => setConnStatus('error');
+      // Only fetch the port once; after that reuse the cached value
+      if (attempt === 0) {
+        try {
+          const port = window.electronAPI
+            ? await window.electronAPI.getBackendPort()
+            : 8000;
+          wsPortRef.current = port;
+          setBackendPort(port);
+        } catch {
+          setConnStatus('error');
+        }
+      }
+      if (cancelled) return;
+      setConnStatus('connecting');
+      socket = new WebSocket(`ws://127.0.0.1:${wsPortRef.current}/ws`);
+
+      socket.onopen = () => {
+        attempt = 0;
+        setConnStatus('connected');
+        setWs(socket);
+      };
+
+      socket.onclose = () => {
+        setConnStatus('disconnected');
+        setWs(null);
+        if (!cancelled) {
+          const delay = Math.min(1000 * 2 ** attempt, 16000);
+          attempt += 1;
+          retryTimer = setTimeout(connect, delay);
+        }
+      };
+
+      socket.onerror = () => {
+        setConnStatus('error');
+        // onclose fires after onerror, which triggers the retry
+      };
     }
 
-    connect().catch(() => setConnStatus('error'));
-    return () => { cancelled = true; socket?.close(); };
+    connect();
+    return () => {
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      socket?.close();
+    };
   }, []);
 
   // Scan devices on WS connect, and re-scan whenever live/settings tab opens with empty list
@@ -109,7 +145,7 @@ export default function App() {
       setScanning(true);
       ws.send(JSON.stringify({ action: 'list_devices' }));
     }
-  }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [tab, ws, devices.length, scanning]);
 
   useEffect(() => {
     if (!ws) return;
@@ -176,7 +212,7 @@ export default function App() {
   const canCalibrate = includedFrames.filter(f => f.quality !== 'fail').length >= 3;
 
   const runCalibration = () => {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN || calibrating) return;
     // Store context so the calibrate_result handler picks the right imageSize/frames
     pendingImageSizeRef.current = imageSize;
     pendingFramesRef.current = includedFrames.map((f, i) => ({
@@ -350,7 +386,7 @@ export default function App() {
                   </span>
                   <span className="text-sm text-slate-200">{devices[0].name}</span>
                   {detectedW > 0 && (
-                    <span className="ml-auto text-xs text-slate-500">{detectedW}×{detectedH} · {detectedFps % 1 === 0 ? detectedFps : detectedFps.toFixed(2)} fps</span>
+                    <span className="ml-auto text-xs text-slate-500">{detectedW}×{detectedH} · {Math.abs(detectedFps - Math.round(detectedFps)) < 0.01 ? Math.round(detectedFps) : detectedFps.toFixed(2)} fps</span>
                   )}
                 </div>
               )}

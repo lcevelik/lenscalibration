@@ -1,7 +1,9 @@
 import argparse
 import asyncio
+import atexit
 import base64
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
@@ -23,11 +25,30 @@ from live_capture import run_live_capture, run_preview
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
+    # Restrict to localhost origins only — this backend is not a public API
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173",
+                   "http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
-_executor = ThreadPoolExecutor()
+
+# Size the pool so CPU-bound calibration tasks don't starve preview I/O
+_executor = ThreadPoolExecutor(max_workers=min(16, (os.cpu_count() or 1) + 4))
+atexit.register(lambda: _executor.shutdown(wait=False))
+
+
+def _is_safe_path(path: str) -> bool:
+    """Return True if path points to a regular image file with no traversal."""
+    try:
+        resolved = os.path.realpath(os.path.abspath(path))
+        # Reject obvious traversal sequences even before realpath
+        if ".." in path:
+            return False
+        # Allow any absolute path that resolves to a real file; the Electron
+        # front-end always sends paths it obtained from a file-picker dialog.
+        return os.path.isfile(resolved)
+    except (ValueError, OSError):
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -48,6 +69,8 @@ def _make_thumbnail(path: str, width: int) -> Optional[bytes]:
 
 @app.get("/thumbnail")
 async def get_thumbnail(path: str, width: int = 200):
+    if not _is_safe_path(path):
+        raise HTTPException(status_code=403, detail="Access denied")
     loop = asyncio.get_event_loop()
     data = await loop.run_in_executor(_executor, _make_thumbnail, path, width)
     if data is None:
@@ -59,10 +82,19 @@ async def get_thumbnail(path: str, width: int = 200):
 # WebSocket handlers
 # ---------------------------------------------------------------------------
 
+def _clamp_board(cols: int, rows: int) -> tuple[int, int]:
+    """Clamp board dimensions to a safe range."""
+    return max(2, min(cols, 25)), max(2, min(rows, 25))
+
+
 async def _handle_score_frames(websocket: WebSocket, message: dict) -> None:
     paths: list = message.get("paths", [])
+    if not isinstance(paths, list):
+        await websocket.send_text(json.dumps({"error": "paths must be a list"}))
+        return
     board_cols: int = int(message.get("board_cols", 9))
     board_rows: int = int(message.get("board_rows", 6))
+    board_cols, board_rows = _clamp_board(board_cols, board_rows)
     checkerboard_size = (board_cols, board_rows)
     loop = asyncio.get_event_loop()
     for index, path in enumerate(paths):
@@ -77,9 +109,10 @@ async def _handle_calibrate(websocket: WebSocket, message: dict) -> None:
     scored_frames: list = message.get("scored_frames", [])
     board_cols: int = int(message.get("board_cols", 9))
     board_rows: int = int(message.get("board_rows", 6))
-    square_size_mm: float = float(message.get("square_size_mm", 25.0))
+    board_cols, board_rows = _clamp_board(board_cols, board_rows)
+    square_size_mm: float = max(1.0, min(float(message.get("square_size_mm", 25.0)), 500.0))
     image_size: tuple = tuple(message.get("image_size", [1920, 1080]))
-    squeeze_ratio: float = float(message.get("squeeze_ratio", 1.0))
+    squeeze_ratio: float = max(1.0, min(float(message.get("squeeze_ratio", 1.0)), 4.0))
     usable_count = sum(1 for f in scored_frames if f.get("quality") != "fail")
     await websocket.send_text(json.dumps({
         "action": "calibrate_progress",
@@ -97,11 +130,12 @@ async def _handle_calibrate_zoom(websocket: WebSocket, message: dict) -> None:
     fl_groups:      list  = message.get("fl_groups", [])
     board_cols:     int   = int(message.get("board_cols", 9))
     board_rows:     int   = int(message.get("board_rows", 6))
-    square_size_mm: float = float(message.get("square_size_mm", 25.0))
+    board_cols, board_rows = _clamp_board(board_cols, board_rows)
+    square_size_mm: float = max(1.0, min(float(message.get("square_size_mm", 25.0)), 500.0))
     image_size:     tuple = tuple(message.get("image_size", [1920, 1080]))
-    sensor_width_mm:  float = float(message.get("sensor_width_mm", 0.0))
-    sensor_height_mm: float = float(message.get("sensor_height_mm", 0.0))
-    squeeze_ratio:    float = float(message.get("squeeze_ratio", 1.0))
+    sensor_width_mm:  float = max(0.0, float(message.get("sensor_width_mm", 0.0)))
+    sensor_height_mm: float = max(0.0, float(message.get("sensor_height_mm", 0.0)))
+    squeeze_ratio:    float = max(1.0, min(float(message.get("squeeze_ratio", 1.0)), 4.0))
 
     total_frames = sum(len(g.get("frames", [])) for g in fl_groups)
     await websocket.send_text(json.dumps({
@@ -157,6 +191,7 @@ async def _handle_export(websocket: WebSocket, message: dict) -> None:
                                       squeeze_ratio=squeeze_ratio)
     elif fmt == "ue5_ulens_zoom":
         fl_results       = message.get("fl_results", [])
+        fl_interpolated  = message.get("fl_interpolated")          # may be None
         nodal_offsets_mm = message.get("nodal_offsets_mm", {})
         lens_name        = message.get("lens_name", "Lens")
         sensor_width_mm  = float(message.get("sensor_width_mm",  0.0))
@@ -168,6 +203,7 @@ async def _handle_export(websocket: WebSocket, message: dict) -> None:
             sensor_height_mm=sensor_height_mm,
             squeeze_ratio=squeeze_ratio,
             lens_type=lens_type,
+            fl_interpolated=fl_interpolated,
         )
     else:
         lens_name        = message.get("lens_name", "Lens")
@@ -186,6 +222,8 @@ async def _handle_export(websocket: WebSocket, message: dict) -> None:
 
 
 def _do_undistort(path: str, camera_matrix: list, dist_coeffs: list) -> dict:
+    if not _is_safe_path(path):
+        return {"success": False, "error": "Access denied"}
     img = cv2.imread(path)
     if img is None:
         return {"success": False, "error": f"Cannot read image: {path}"}
@@ -265,7 +303,7 @@ async def websocket_endpoint(websocket: WebSocket):
             try:
                 message = json.loads(raw)
             except json.JSONDecodeError:
-                await websocket.send_text(json.dumps({"error": "invalid JSON", "raw": raw}))
+                await websocket.send_text(json.dumps({"error": "invalid JSON", "raw": raw[:200]}))
                 continue
 
             action = message.get("action")

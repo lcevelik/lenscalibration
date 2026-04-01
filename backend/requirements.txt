@@ -2,6 +2,7 @@ fastapi
 uvicorn[standard]
 opencv-python
 numpy
+scipy
 websockets
 openexr
 imath

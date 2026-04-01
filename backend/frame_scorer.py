@@ -6,6 +6,9 @@ import numpy as np
 
 from pose_advisor import compute_pose_metrics
 
+# Create once — constructing CLAHE per-frame wastes ~0.5 ms on every call
+_CLAHE = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+
 
 def score_frame(image_path: str, checkerboard_size: tuple) -> dict:
     img = cv2.imread(image_path)
@@ -26,8 +29,7 @@ def _score_image(img: np.ndarray, gray: np.ndarray, w: int, h: int, checkerboard
     sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
     # CLAHE-enhanced gray for detection (improves contrast on SDI/capture-card signals)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    gray_eq = clahe.apply(gray)
+    gray_eq = _CLAHE.apply(gray)
 
     # --- Attempt 1: SB on CLAHE-enhanced (exhaustive + accuracy) ---
     sb_flags = (cv2.CALIB_CB_NORMALIZE_IMAGE
@@ -48,7 +50,8 @@ def _score_image(img: np.ndarray, gray: np.ndarray, w: int, h: int, checkerboard
         found, corners = cv2.findChessboardCorners(gray_eq, checkerboard_size, flags)
         if found:
             criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
-            corners = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), criteria)
+            # Refine on the same image the detector used (gray_eq) for consistency
+            corners = cv2.cornerSubPix(gray_eq, corners, (11, 11), (-1, -1), criteria)
 
     # --- Attempt 4: classic detector on raw gray ---
     if not found:

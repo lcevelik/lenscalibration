@@ -159,9 +159,11 @@ def enumerate_capture_devices() -> list[dict]:
     """
     devices: list[dict] = []
 
-    # Try name-aware backends first
+    # Try name-aware backends first.
+    # None  → backend unavailable (fall through to next)
+    # []    → backend worked but found nothing (also fall through)
     names: list[str] | None = _enum_pygrabber()
-    if names is None:
+    if not names:  # covers both None and empty list
         names = _enum_powershell()
 
     if names:

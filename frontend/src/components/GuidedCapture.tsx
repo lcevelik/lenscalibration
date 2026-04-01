@@ -83,7 +83,9 @@ const CONFIDENCE_COLOR: Record<string, string> = {
 
 function fmtFps(fps: number): string {
   if (fps <= 0) return '—';
-  return fps % 1 === 0 ? String(fps) : fps.toFixed(2).replace(/\.?0+$/, '');
+  // Use tolerance instead of exact modulo to handle floats like 29.9999…
+  const rounded = Math.round(fps);
+  return Math.abs(fps - rounded) < 0.01 ? String(rounded) : fps.toFixed(2).replace(/\.?0+$/, '');
 }
 
 // ---------------------------------------------------------------------------
@@ -265,7 +267,7 @@ export default function GuidedCapture({ ws, boardSettings, onCalibrationSent, se
   };
 
   const startCapture = () => {
-    if (!ws || ws.readyState !== WebSocket.OPEN || selectedIdx === null) return;
+    if (running || !ws || ws.readyState !== WebSocket.OPEN || selectedIdx === null) return;
     if (activeFlIdx === null) return;
     setCapturedFrames([]); setLiveFrame(null);
     setChecklist([]); setChecklistComplete(false);

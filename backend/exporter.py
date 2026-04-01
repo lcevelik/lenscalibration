@@ -130,12 +130,10 @@ def export_stmap_exr(
             cm, dc, None, cm, (w_out, h), cv2.CV_32FC1
         )
 
-        # Normalize to 0–1 UV space (STmap convention)
-        # map_x is in de-squeezed pixel space; normalize to squeezed input 0-1
-        if squeeze_ratio > 1.0:
-            u = (map_x / squeeze_ratio / (w - 1)).astype(np.float32)
-        else:
-            u = (map_x / (w - 1)).astype(np.float32)
+        # Normalize to 0–1 UV space (STmap convention).
+        # map_x is in de-squeezed output pixel space (w_out wide); normalize
+        # across the full output width so U spans exactly [0, 1].
+        u = (map_x / max(w_out - 1, 1)).astype(np.float32)
         v = (map_y / (h - 1)).astype(np.float32)
         zeros = np.zeros((h, w_out), dtype=np.float32)
 
@@ -307,50 +305,81 @@ def export_ue5_ulens_zoom(
     sensor_height_mm: float = 0.0,
     squeeze_ratio: float = 1.0,
     lens_type: str = "spherical",
+    fl_interpolated: Optional[list] = None,
 ) -> dict:
     """
     Export a multi-focal-length .ulens file for zoom lenses.
-    One row per focal length in every table.
+
+    When ``fl_interpolated`` is supplied (from run_zoom_calibration), the
+    dense interpolated rows are merged with the calibrated rows to give UE5
+    a fine-grained zoom table, preventing linear-interpolation artefacts
+    across large focal-length gaps.
+
     ZoomEncoder is normalised 0–1 across the captured FL range.
-    NodalOffset Tz is the optical-centre Z-shift in mm vs the shortest FL.
+    NodalOffset Tz is the optical-centre Z-shift in mm vs the best-RMS FL.
     """
     try:
         w, h = int(image_size[0]), int(image_size[1])
         calib_w = int(w * squeeze_ratio) if squeeze_ratio > 1.0 else w
 
-        valid = sorted(
+        # Calibrated rows (have a real camera_matrix)
+        calibrated = sorted(
             [r for r in fl_results if r.get("rms") is not None],
             key=lambda r: r["focal_length_mm"],
         )
-        if not valid:
+        if not calibrated:
             return {"success": False, "output_path": path,
                     "error": "No valid focal-length results to export"}
 
-        fl_min   = valid[0]["focal_length_mm"]
-        fl_max   = valid[-1]["focal_length_mm"]
+        fl_min   = calibrated[0]["focal_length_mm"]
+        fl_max   = calibrated[-1]["focal_length_mm"]
         fl_range = max(fl_max - fl_min, 1.0)
         focus_enc = 0.0
 
         def ze(fl_mm: float) -> float:
             return round((fl_mm - fl_min) / fl_range, 6)
 
+        # Merge calibrated + interpolated rows, sorted by FL.
+        # Interpolated rows carry pre-computed fx_px/fy_px/cx_px/cy_px and
+        # nodal_offset_z_mm directly (no camera_matrix needed).
+        all_rows = list(calibrated)
+        if fl_interpolated:
+            all_rows += fl_interpolated
+        all_rows.sort(key=lambda r: r["focal_length_mm"])
+
         fl_rows, ic_rows, nd_rows, dist_rows = [], [], [], []
 
-        for r in valid:
+        for r in all_rows:
             fl_mm = r["focal_length_mm"]
-            cm    = np.array(r["camera_matrix"], dtype=np.float64)
-            dc    = np.array(r["dist_coeffs"],   dtype=np.float64).flatten()
+            is_interp = r.get("interpolated", False)
 
-            fx_n = float(cm[0, 0]) / calib_w
-            fy_n = float(cm[1, 1]) / h
-            cx_n = float(cm[0, 2]) / calib_w
-            cy_n = float(cm[1, 2]) / h
+            if is_interp:
+                # Interpolated row: parameters are already in pixel units
+                fx_n = r["fx_px"] / calib_w
+                fy_n = r["fy_px"] / h
+                cx_n = r["cx_px"] / calib_w
+                cy_n = r["cy_px"] / h
+                dc   = r.get("dist_coeffs", [0.0] * 5)
 
-            def _d(i: int) -> float:
-                return float(dc[i]) if len(dc) > i else 0.0
+                def _di(i: int) -> float:
+                    return float(dc[i]) if i < len(dc) else 0.0
 
-            k1, k2, p1, p2, k3 = _d(0), _d(1), _d(2), _d(3), _d(4)
-            nz   = float(nodal_offsets_mm.get(str(fl_mm), 0.0))   # mm
+                k1, k2, p1, p2, k3 = _di(0), _di(1), _di(2), _di(3), _di(4)
+                nz = float(r.get("nodal_offset_z_mm", 0.0))
+            else:
+                cm = np.array(r["camera_matrix"], dtype=np.float64)
+                dc_arr = np.array(r["dist_coeffs"], dtype=np.float64).flatten()
+                fx_n = float(cm[0, 0]) / calib_w
+                fy_n = float(cm[1, 1]) / h
+                cx_n = float(cm[0, 2]) / calib_w
+                cy_n = float(cm[1, 2]) / h
+
+                def _d(i: int) -> float:
+                    return float(dc_arr[i]) if len(dc_arr) > i else 0.0
+
+                k1, k2, p1, p2, k3 = _d(0), _d(1), _d(2), _d(3), _d(4)
+                _nz_key = str(int(fl_mm)) if fl_mm == int(fl_mm) else f"{fl_mm:.1f}"
+                nz = float(nodal_offsets_mm.get(_nz_key, 0.0))
 
             fl_rows.append([focus_enc, ze(fl_mm), fx_n, fy_n])
             ic_rows.append([focus_enc, ze(fl_mm), cx_n, cy_n])

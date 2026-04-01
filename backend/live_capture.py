@@ -249,7 +249,9 @@ async def run_live_capture(
             do_capture = force or (hold_progress >= 1.0 and matching_pose is not None)
 
             if do_capture:
-                ts = int(time.time() * 1000)
+                # Use nanosecond timestamp to avoid collisions when two captures
+                # happen within the same millisecond (e.g. rapid manual triggers)
+                ts = time.time_ns()
                 save_path = os.path.join(save_dir, f"frame_{ts}.jpg")
                 await loop.run_in_executor(
                     None,
