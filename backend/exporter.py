@@ -69,6 +69,8 @@ def export_json(
     fov_y: float,
     rms: float,
     metadata: Optional[dict] = None,
+    squeeze_ratio: float = 1.0,
+    lens_type: str = "spherical",
 ) -> dict:
     try:
         cm = np.array(camera_matrix, dtype=np.float64)
@@ -79,6 +81,8 @@ def export_json(
             "rms": rms,
             "fov_x": fov_x,
             "fov_y": fov_y,
+            "lens_type": lens_type,
+            "squeeze_ratio": round(squeeze_ratio, 4),
             "camera_matrix": {
                 "fx": cm[0, 0],
                 "fy": cm[1, 1],
@@ -107,6 +111,7 @@ def export_stmap_exr(
     camera_matrix: list,
     dist_coeffs: list,
     image_size: tuple,  # (width, height)
+    squeeze_ratio: float = 1.0,
 ) -> dict:
     if not _HAS_EXR:
         return {
@@ -119,20 +124,25 @@ def export_stmap_exr(
         cm = np.array(camera_matrix, dtype=np.float64)
         dc = np.array(dist_coeffs, dtype=np.float64)
         w, h = int(image_size[0]), int(image_size[1])
+        w_out = int(w * squeeze_ratio) if squeeze_ratio > 1.0 else w
 
         map_x, map_y = cv2.initUndistortRectifyMap(
-            cm, dc, None, cm, (w, h), cv2.CV_32FC1
+            cm, dc, None, cm, (w_out, h), cv2.CV_32FC1
         )
 
         # Normalize to 0–1 UV space (STmap convention)
-        u = (map_x / (w - 1)).astype(np.float32)
+        # map_x is in de-squeezed pixel space; normalize to squeezed input 0-1
+        if squeeze_ratio > 1.0:
+            u = (map_x / squeeze_ratio / (w - 1)).astype(np.float32)
+        else:
+            u = (map_x / (w - 1)).astype(np.float32)
         v = (map_y / (h - 1)).astype(np.float32)
-        zeros = np.zeros((h, w), dtype=np.float32)
+        zeros = np.zeros((h, w_out), dtype=np.float32)
 
         header = {
             "compression": OpenEXR.ZIP_COMPRESSION,
-            "dataWindow": ((0, 0), (w - 1, h - 1)),
-            "displayWindow": ((0, 0), (w - 1, h - 1)),
+            "dataWindow": ((0, 0), (w_out - 1, h - 1)),
+            "displayWindow": ((0, 0), (w_out - 1, h - 1)),
         }
         channels = {
             "R": OpenEXR.Channel(u),
@@ -171,6 +181,8 @@ def export_ue5_ulens(
     lens_name: str = "Lens",
     sensor_width_mm: float = 0.0,
     sensor_height_mm: float = 0.0,
+    squeeze_ratio: float = 1.0,
+    lens_type: str = "spherical",
 ) -> dict:
     """
     Produces a .ulens JSON file matching the format used by UE5's
@@ -189,10 +201,11 @@ def export_ue5_ulens(
         cm = np.array(camera_matrix, dtype=np.float64)
         dc = np.array(dist_coeffs, dtype=np.float64).flatten()
         w, h = int(image_size[0]), int(image_size[1])
+        calib_w = int(w * squeeze_ratio) if squeeze_ratio > 1.0 else w
 
-        fx = float(cm[0, 0]) / w
+        fx = float(cm[0, 0]) / calib_w
         fy = float(cm[1, 1]) / h
-        cx = float(cm[0, 2]) / w
+        cx = float(cm[0, 2]) / calib_w
         cy = float(cm[1, 2]) / h
 
         # OpenCV dist_coeffs order: k1 k2 p1 p2 [k3 ...]
@@ -205,20 +218,29 @@ def export_ue5_ulens(
         focus_enc = 0.0
         zoom_enc  = 0.0
 
+        lens_info: dict = {
+            "serialNumber": "None",
+            "modelName": lens_name,
+            "distortionModel": "Spherical",
+        }
+        if squeeze_ratio > 1.0:
+            lens_info["squeezeRatio"] = round(squeeze_ratio, 4)
+
+        user_metadata = []
+        if squeeze_ratio > 1.0:
+            user_metadata.append({"key": "lensType", "value": "anamorphic"})
+            user_metadata.append({"key": "squeezeRatio", "value": str(round(squeeze_ratio, 4))})
+
         ulens = {
             "metadata": {
                 "type": "LensFile",
                 "version": "0.0.0",
-                "lensInfo": {
-                    "serialNumber": "None",
-                    "modelName": lens_name,
-                    "distortionModel": "Spherical",
-                },
+                "lensInfo": lens_info,
                 "name": lens_name,
                 "nodalOffsetCoordinateSystem": "OpenCV",
                 "fxFyUnits": "Normalized",
                 "cxCyUnits": "Normalized",
-                "userMetadata": [],
+                "userMetadata": user_metadata,
             },
             "sensorDimensions": {
                 "width":  round(sensor_width_mm,  6),
@@ -264,6 +286,132 @@ def export_ue5_ulens(
                     "header": "IrisEncoder, IrisFstop",
                     "data": "",
                 },
+            ],
+        }
+
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(ulens, f, indent="\t")
+
+        return {"success": True, "output_path": os.path.abspath(path), "error": None}
+    except Exception as exc:
+        return {"success": False, "output_path": path, "error": str(exc)}
+
+
+def export_ue5_ulens_zoom(
+    path: str,
+    fl_results: list,
+    image_size: tuple,          # (width, height)
+    nodal_offsets_mm: dict,     # {str(fl_mm): float}
+    lens_name: str = "Lens",
+    sensor_width_mm: float = 0.0,
+    sensor_height_mm: float = 0.0,
+    squeeze_ratio: float = 1.0,
+    lens_type: str = "spherical",
+) -> dict:
+    """
+    Export a multi-focal-length .ulens file for zoom lenses.
+    One row per focal length in every table.
+    ZoomEncoder is normalised 0–1 across the captured FL range.
+    NodalOffset Tz is the optical-centre Z-shift in mm vs the shortest FL.
+    """
+    try:
+        w, h = int(image_size[0]), int(image_size[1])
+        calib_w = int(w * squeeze_ratio) if squeeze_ratio > 1.0 else w
+
+        valid = sorted(
+            [r for r in fl_results if r.get("rms") is not None],
+            key=lambda r: r["focal_length_mm"],
+        )
+        if not valid:
+            return {"success": False, "output_path": path,
+                    "error": "No valid focal-length results to export"}
+
+        fl_min   = valid[0]["focal_length_mm"]
+        fl_max   = valid[-1]["focal_length_mm"]
+        fl_range = max(fl_max - fl_min, 1.0)
+        focus_enc = 0.0
+
+        def ze(fl_mm: float) -> float:
+            return round((fl_mm - fl_min) / fl_range, 6)
+
+        fl_rows, ic_rows, nd_rows, dist_rows = [], [], [], []
+
+        for r in valid:
+            fl_mm = r["focal_length_mm"]
+            cm    = np.array(r["camera_matrix"], dtype=np.float64)
+            dc    = np.array(r["dist_coeffs"],   dtype=np.float64).flatten()
+
+            fx_n = float(cm[0, 0]) / calib_w
+            fy_n = float(cm[1, 1]) / h
+            cx_n = float(cm[0, 2]) / calib_w
+            cy_n = float(cm[1, 2]) / h
+
+            def _d(i: int) -> float:
+                return float(dc[i]) if len(dc) > i else 0.0
+
+            k1, k2, p1, p2, k3 = _d(0), _d(1), _d(2), _d(3), _d(4)
+            nz   = float(nodal_offsets_mm.get(str(fl_mm), 0.0))   # mm
+
+            fl_rows.append([focus_enc, ze(fl_mm), fx_n, fy_n])
+            ic_rows.append([focus_enc, ze(fl_mm), cx_n, cy_n])
+            nd_rows.append([focus_enc, ze(fl_mm), 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, nz])
+            dist_rows.append([focus_enc, ze(fl_mm), k1, k2, k3, p1, p2])
+
+        zoom_lens_info: dict = {
+            "serialNumber": "None",
+            "modelName":    lens_name,
+            "distortionModel": "Spherical",
+        }
+        if squeeze_ratio > 1.0:
+            zoom_lens_info["squeezeRatio"] = round(squeeze_ratio, 4)
+
+        zoom_user_metadata = []
+        if squeeze_ratio > 1.0:
+            zoom_user_metadata.append({"key": "lensType", "value": "anamorphic"})
+            zoom_user_metadata.append({"key": "squeezeRatio", "value": str(round(squeeze_ratio, 4))})
+
+        ulens = {
+            "metadata": {
+                "type": "LensFile",
+                "version": "0.0.0",
+                "lensInfo": zoom_lens_info,
+                "name":                          lens_name,
+                "nodalOffsetCoordinateSystem":   "OpenCV",
+                "fxFyUnits":                     "Normalized",
+                "cxCyUnits":                     "Normalized",
+                "userMetadata":                  zoom_user_metadata,
+            },
+            "sensorDimensions": {
+                "width":  round(sensor_width_mm,  6),
+                "height": round(sensor_height_mm, 6),
+                "units":  "Millimeters",
+            },
+            "imageDimensions": {"width": w, "height": h},
+            "cameraParameterTables": [
+                {
+                    "parameterName": "FocalLengthTable",
+                    "header":        "FocusEncoder, ZoomEncoder, Fx, Fy",
+                    "data":          _ulens_data(fl_rows),
+                },
+                {
+                    "parameterName": "ImageCenterTable",
+                    "header":        "FocusEncoder, ZoomEncoder, Cx, Cy",
+                    "data":          _ulens_data(ic_rows),
+                },
+                {
+                    "parameterName": "NodalOffsetTable",
+                    "header":        "FocusEncoder, ZoomEncoder, Qx, Qy, Qz, Qw, Tx, Ty, Tz",
+                    "data":          _ulens_data(nd_rows),
+                },
+                {
+                    "parameterName": "DistortionTable",
+                    "header":        "FocusEncoder, ZoomEncoder, K1, K2, K3, P1, P2",
+                    "data":          _ulens_data(dist_rows),
+                },
+            ],
+            "encoderTables": [
+                {"parameterName": "Focus", "header": "FocusEncoder, FocusCM",  "data": ""},
+                {"parameterName": "Iris",  "header": "IrisEncoder, IrisFstop", "data": ""},
             ],
         }
 

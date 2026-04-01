@@ -92,19 +92,19 @@ REQUIRED_POSES: list[dict] = [
     {
         "id":        "close_up",
         "name":      "Close-up (large in frame)",
-        "hint":      "Move the board much closer so it fills at least 50% of the frame",
+        "hint":      "Move the board closer so it fills about a quarter of the frame",
         "region":    None,          # any region is fine
         "tilt_max":  0.30,
         "tilt_min":  0.00,
-        "size_min":  0.40,
+        "size_min":  0.20,
     },
     {
         "id":        "strong_tilt",
-        "name":      "Strong diagonal tilt",
-        "hint":      "Tilt the board heavily at a diagonal angle — as if showing its side",
+        "name":      "Strong tilt (any axis)",
+        "hint":      "Tilt the board toward or away from you — tip the top edge forward or lean it sideways so it looks clearly non-flat",
         "region":    None,
         "tilt_max":  1.00,
-        "tilt_min":  0.45,
+        "tilt_min":  0.20,
         "size_min":  0.05,
     },
     {

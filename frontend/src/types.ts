@@ -30,4 +30,16 @@ export interface BoardSettings {
   squareSizeMm: number;
 }
 
+export interface LensSettings {
+  lensType: 'spherical' | 'anamorphic';
+  squeezeRatio: number; // 1.0 for spherical; 1.33, 1.5, 1.8, 2.0 for anamorphic
+}
+
+export interface CameraSettings {
+  lensName: string;
+  sensorWidthMm: string;   // string so inputs work naturally; parse on use
+  sensorHeightMm: string;
+}
+
 export type ConnStatus = 'connecting' | 'connected' | 'disconnected' | 'error';
+

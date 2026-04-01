@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import time
 from typing import Optional
 
 import cv2
@@ -203,6 +204,9 @@ def open_capture(
     if not cap.isOpened():
         return None
 
+    # Minimise buffer depth so frames are as fresh as possible
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
     # Request format — capture cards may ignore these and lock to signal
     cap.set(cv2.CAP_PROP_FRAME_WIDTH,  float(width))
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, float(height))
@@ -216,3 +220,32 @@ def read_actual_size(cap: cv2.VideoCapture) -> tuple[int, int]:
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     return w or 1920, h or 1080
+
+
+def read_actual_fps(cap: cv2.VideoCapture, n_frames: int = 6) -> float:
+    """
+    Return the actual signal fps.
+    CAP_PROP_FPS on DirectShow often returns the driver default (30.0) even
+    when the SDI signal is 24 or 25 fps.  We measure by timing n_frames live
+    frames and only fall back to the reported value if measurement is unreliable.
+    Keeping n_frames small (default 6) minimises startup latency.
+    """
+    reported = cap.get(cv2.CAP_PROP_FPS)
+
+    t0 = time.perf_counter()
+    count = 0
+    for _ in range(n_frames):
+        ret, _ = cap.read()
+        if ret:
+            count += 1
+    elapsed = time.perf_counter() - t0
+
+    if count >= 4 and elapsed > 0.05:
+        measured = count / elapsed
+        standards = [23.976, 24.0, 25.0, 29.97, 30.0, 48.0, 50.0, 59.94, 60.0]
+        snapped = min(standards, key=lambda s: abs(s - measured))
+        if abs(snapped - measured) < 2.0:
+            return snapped
+        return round(measured, 3)
+
+    return reported if reported and reported > 0 else 30.0

@@ -1,20 +1,5 @@
 import { useEffect, useState } from 'react';
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-export interface CalibrationResult {
-  rms: number;
-  camera_matrix: number[][];
-  dist_coeffs: number[];
-  fov_x: number;
-  fov_y: number;
-  confidence: 'excellent' | 'good' | 'marginal' | 'poor';
-  per_image_errors: Array<{ path: string; error: number; outlier: boolean }>;
-  used_frames: number;
-  skipped_frames: number;
-}
+import type { CalibrationResult } from '../types';
 
 interface Props {
   result: CalibrationResult;
@@ -40,6 +25,32 @@ const EXPORT_FORMATS: ExportFormat[] = [
   { key: 'opencv_xml', label: 'OpenCV XML',    ext: 'xml',   description: 'Ventuz / FreeD compatible FileStorage XML' },
   { key: 'stmap_exr',  label: 'STmap EXR',     ext: 'exr',   description: '32-bit float UV remap for compositing' },
   { key: 'json',       label: 'JSON',          ext: 'json',  description: 'Full calibration data with metadata' },
+];
+
+// ---------------------------------------------------------------------------
+// Camera sensor presets
+// ---------------------------------------------------------------------------
+
+interface SensorPreset {
+  label:  string;
+  w:      number;
+  h:      number;
+  group?: string;
+}
+
+const SENSOR_PRESETS: SensorPreset[] = [
+  // Sony Venice (CineAlta)
+  { group: 'Sony Venice',         label: 'Venice — FF 6K (36.0 × 24.0)',      w: 36.0,  h: 24.0  },
+  { group: 'Sony Venice',         label: 'Venice — S35 4K (26.2 × 13.8)',      w: 26.2,  h: 13.8  },
+  // Sony Venice 2
+  { group: 'Sony Venice 2',       label: 'Venice 2 — FF 8K (35.9 × 24.0)',     w: 35.9,  h: 24.0  },
+  { group: 'Sony Venice 2',       label: 'Venice 2 — FF 6K (36.0 × 24.0)',     w: 36.0,  h: 24.0  },
+  { group: 'Sony Venice 2',       label: 'Venice 2 — S35 6K (26.2 × 14.7)',    w: 26.2,  h: 14.7  },
+  { group: 'Sony Venice 2',       label: 'Venice 2 — S16 (14.6 × 8.2)',        w: 14.6,  h: 8.2   },
+  // Sony Burano
+  { group: 'Sony Burano',         label: 'Burano — FF 8K (35.9 × 24.0)',       w: 35.9,  h: 24.0  },
+  { group: 'Sony Burano',         label: 'Burano — S35 (26.2 × 14.7)',         w: 26.2,  h: 14.7  },
+  { group: 'Sony Burano',         label: 'Burano — S16 (14.6 × 8.2)',          w: 14.6,  h: 8.2   },
 ];
 
 const DC_NAMES_5  = ['k1', 'k2', 'p1', 'p2', 'k3'];
@@ -139,13 +150,28 @@ export default function ResultPanel({ result, imageSize, ws }: Props) {
     return () => ws.removeEventListener('message', handler);
   }, [ws]);
 
-  const sendExport = (fmt: ExportFormat) => {
+  const sendExport = async (fmt: ExportFormat) => {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+    // Ask user where to save via the native OS dialog (Electron only)
+    let outputPath = `calibration.${fmt.ext}`;
+    if (window.electronAPI?.showSaveDialog) {
+      const dlg = await window.electronAPI.showSaveDialog({
+        defaultPath: outputPath,
+        filters: [
+          { name: fmt.label, extensions: [fmt.ext] },
+          { name: 'All Files', extensions: ['*'] },
+        ],
+      });
+      if (dlg.canceled || !dlg.filePath) return;
+      outputPath = dlg.filePath;
+    }
+
     setExportStates((prev) => ({ ...prev, [fmt.key]: 'loading' }));
     const msg: Record<string, unknown> = {
       action: 'export',
       format: fmt.key,
-      output_path: `calibration.${fmt.ext}`,
+      output_path: outputPath,
       camera_matrix: result.camera_matrix,
       dist_coeffs: result.dist_coeffs,
       fov_x: result.fov_x,
@@ -339,6 +365,32 @@ export default function ResultPanel({ result, imageSize, ws }: Props) {
         {/* UE5 .ulens metadata */}
         <div className="mb-3 p-3 rounded-lg bg-slate-900 border border-slate-700 space-y-2">
           <p className="text-[10px] text-slate-500 uppercase tracking-wider">UE5 .ulens metadata</p>
+
+          {/* Camera sensor preset picker */}
+          <div className="flex flex-col gap-0.5">
+            <span className="text-[10px] text-slate-500">Camera preset</span>
+            <select
+              defaultValue=""
+              onChange={e => {
+                const preset = SENSOR_PRESETS.find(p => p.label === e.target.value);
+                if (preset) {
+                  setSensorWidthMm(String(preset.w));
+                  setSensorHeightMm(String(preset.h));
+                }
+              }}
+              className="bg-slate-800 border border-slate-600 rounded px-2 py-1 text-xs text-slate-200 focus:outline-none focus:border-blue-500"
+            >
+              <option value="" disabled>Select camera to fill sensor size…</option>
+              {(['Sony Venice', 'Sony Venice 2', 'Sony Burano'] as const).map(group => (
+                <optgroup key={group} label={group}>
+                  {SENSOR_PRESETS.filter(p => p.group === group).map(p => (
+                    <option key={p.label} value={p.label}>{p.label}</option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
+          </div>
+
           <div className="flex gap-2 flex-wrap">
             <label className="flex flex-col gap-0.5 flex-1 min-w-[120px]">
               <span className="text-[10px] text-slate-500">Lens name</span>
@@ -355,7 +407,7 @@ export default function ResultPanel({ result, imageSize, ws }: Props) {
                 type="number"
                 value={sensorWidthMm}
                 onChange={e => setSensorWidthMm(e.target.value)}
-                placeholder="33.8"
+                placeholder="36.0"
                 className="bg-slate-800 border border-slate-600 rounded px-2 py-1 text-xs text-slate-200 focus:outline-none focus:border-blue-500"
               />
             </label>
@@ -365,7 +417,7 @@ export default function ResultPanel({ result, imageSize, ws }: Props) {
                 type="number"
                 value={sensorHeightMm}
                 onChange={e => setSensorHeightMm(e.target.value)}
-                placeholder="19.0"
+                placeholder="24.0"
                 className="bg-slate-800 border border-slate-600 rounded px-2 py-1 text-xs text-slate-200 focus:outline-none focus:border-blue-500"
               />
             </label>

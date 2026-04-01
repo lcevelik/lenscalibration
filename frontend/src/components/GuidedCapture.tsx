@@ -1,62 +1,66 @@
 import { useEffect, useRef, useState } from 'react';
-import type { BoardSettings, CalibrationResult, ScoredFrame } from '../types';
-import BoardPresetSelector from './BoardPresetSelector';
+import type { BoardSettings, CameraSettings, LensSettings, ScoredFrame } from '../types';
 import PoseDiagram from './PoseDiagram';
-import ResultPanel from './ResultPanel';
 
-const STREAM_W = 640;
-const STREAM_H = 360;
-const MIN_GOOD_FOR_CALIB = 5;
+const STREAM_W         = 640;
+const STREAM_H         = 360;
+const MIN_FRAMES_PER_FL = 5;
+const SNAP_FLS = [18, 24, 28, 35, 50, 70, 85, 100, 135, 150, 200];
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-interface DeviceBrand {
-  id: string;
-  name: string;
-  icon: string;
-  is_capture_card: boolean;
-}
-
-interface CaptureDevice {
-  index: number;
-  name: string;
-  brand: DeviceBrand;
-}
-
-interface PoseItem {
-  id: string;
-  name: string;
-  hint: string;
-  satisfied: boolean;
-}
+interface PoseItem     { id: string; name: string; hint: string; satisfied: boolean; }
+interface NextPoseReqs { regions: number[] | null; tilt_min: number; tilt_max: number; size_min: number; }
+interface MatchStatus  { position_ok: boolean; tilt_ok: boolean; size_ok: boolean; }
 
 interface LiveFrame {
-  frame: string;
-  found: boolean;
-  corners: [number, number][];
-  quality: string;
-  sharpness: number;
-  coverage: number;
-  auto_captured: boolean;
-  frame_count: number;
-  checklist: PoseItem[];
-  satisfied_count: number;
-  total: number;
-  complete: boolean;
-  next_hint: string;
-  next_pose_id: string | null;
-  matching_pose_id: string | null;
-  hold_progress: number;   // 0–1: how long the board has been held in the matching pose
-  message: string;
+  frame: string; found: boolean; corners: [number, number][];
+  quality: string; sharpness: number; coverage: number;
+  auto_captured: boolean; frame_count: number;
+  checklist: PoseItem[]; satisfied_count: number; total: number; complete: boolean;
+  next_hint: string; next_pose_id: string | null; matching_pose_id: string | null;
+  hold_progress: number; message: string;
+  next_pose_reqs: NextPoseReqs | null; match_status: MatchStatus | null;
+}
+
+interface FlGroup {
+  fl_mm: number;
+  frames: ScoredFrame[];
+  status: 'pending' | 'capturing' | 'done';
+}
+
+interface ZoomFlResult {
+  focal_length_mm: number; rms: number | null;
+  fx_px: number; fy_px: number; cx_px: number; cy_px: number;
+  focal_length_computed_mm: number; dist_coeffs: number[];
+  camera_matrix: number[][]; optical_center_world: [number, number, number];
+  used_frames: number; per_image_errors: Array<{ path: string; error: number; outlier: boolean }>;
+  confidence: string; error?: string | null;
+}
+
+interface ZoomCalibResult {
+  success: boolean; error: string | null;
+  fl_results: ZoomFlResult[]; nodal_offsets_mm: Record<string, number>;
 }
 
 interface Props {
   ws: WebSocket | null;
   boardSettings: BoardSettings;
-  onBoardChange: (s: BoardSettings) => void;
   backendPort: number;
+  onCalibrationSent: (imageSize: [number, number], frames: Array<{
+    path: string; quality: 'good'|'warn'|'fail'; sharpness: number; coverage: number; index: number;
+  }>) => void;
+  // Device props lifted from App/Settings
+  selectedIdx: number | null;
+  selectedDeviceName: string | null;
+  detectedW: number;
+  detectedH: number;
+  detectedFps: number;
+  lensSettings: LensSettings;
+  onLensChange: (s: LensSettings) => void;
+  cameraSettings: CameraSettings;
 }
 
 // ---------------------------------------------------------------------------
@@ -69,79 +73,35 @@ const QUALITY_COLOR: Record<string, string> = {
   fail: 'text-red-400     border-red-500/40     bg-red-500/10',
 };
 
-const BRAND_COLOR: Record<string, string> = {
-  blackmagic: 'bg-yellow-500/20 text-yellow-300 border-yellow-500/30',
-  aja:        'bg-red-500/20    text-red-300    border-red-500/30',
-  bluefish444:'bg-blue-500/20   text-blue-300   border-blue-500/30',
-  magewell:   'bg-purple-500/20 text-purple-300 border-purple-500/30',
-  datapath:   'bg-orange-500/20 text-orange-300 border-orange-500/30',
-  deltacast:  'bg-cyan-500/20   text-cyan-300   border-cyan-500/30',
-  generic:    'bg-slate-700     text-slate-400  border-slate-600',
+const CONFIDENCE_COLOR: Record<string, string> = {
+  excellent: 'text-emerald-400',
+  good:      'text-blue-400',
+  marginal:  'text-yellow-400',
+  poor:      'text-red-400',
 };
 
-const RESOLUTIONS = [
-  { label: '4K UHD  3840×2160', w: 3840, h: 2160 },
-  { label: '4K DCI  4096×2160', w: 4096, h: 2160 },
-  { label: '2K DCI  2048×1080', w: 2048, h: 1080 },
-  { label: '1080p   1920×1080', w: 1920, h: 1080 },
-  { label: '720p    1280×720',  w: 1280, h: 720  },
-  { label: '576p    720×576',   w: 720,  h: 576  },
-  { label: '480p    720×480',   w: 720,  h: 480  },
-];
 
-// fps stored as number (exact float); label is display string
-const FRAMERATES: { label: string; fps: number }[] = [
-  { label: '23.976',  fps: 24000 / 1001 },
-  { label: '24',      fps: 24           },
-  { label: '25',      fps: 25           },
-  { label: '29.97',   fps: 30000 / 1001 },
-  { label: '30',      fps: 30           },
-  { label: '47.952',  fps: 48000 / 1001 },
-  { label: '48',      fps: 48           },
-  { label: '50',      fps: 50           },
-  { label: '59.94',   fps: 60000 / 1001 },
-  { label: '60',      fps: 60           },
-  { label: '119.88',  fps: 120000 / 1001},
-  { label: '120',     fps: 120          },
-];
+function fmtFps(fps: number): string {
+  if (fps <= 0) return '—';
+  return fps % 1 === 0 ? String(fps) : fps.toFixed(2).replace(/\.?0+$/, '');
+}
 
 // ---------------------------------------------------------------------------
-// Component
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Hold-ring — circular countdown SVG overlaid on the video
+// Hold-ring SVG
 // ---------------------------------------------------------------------------
 
 function HoldRing({ progress }: { progress: number }) {
-  const R  = 28;           // circle radius
-  const cx = 50, cy = 50;  // centre of the 100×100 viewBox
+  const R = 28, cx = 50, cy = 50;
   const circumference = 2 * Math.PI * R;
-  const dash = circumference * progress;
-
   return (
-    <svg
-      viewBox="0 0 100 100"
-      className="absolute inset-0 w-full h-full pointer-events-none"
-      aria-hidden="true"
-    >
-      {/* Background track */}
-      <circle cx={cx} cy={cy} r={R}
-        fill="none" stroke="rgba(255,255,255,0.15)" strokeWidth="4" />
-      {/* Progress arc — starts from top (rotated -90°) */}
-      <circle cx={cx} cy={cy} r={R}
-        fill="none"
-        stroke={progress >= 0.99 ? '#10b981' : '#818cf8'}
-        strokeWidth="4"
-        strokeLinecap="round"
-        strokeDasharray={`${dash} ${circumference}`}
-        transform={`rotate(-90 ${cx} ${cy})`}
-        className="hold-ring-arc"
-      />
-      {/* Centre label */}
+    <svg viewBox="0 0 100 100" className="absolute inset-0 w-full h-full pointer-events-none" aria-hidden="true">
+      <circle cx={cx} cy={cy} r={R} fill="none" stroke="rgba(255,255,255,0.15)" strokeWidth="4" />
+      <circle cx={cx} cy={cy} r={R} fill="none"
+        stroke={progress >= 0.99 ? '#10b981' : '#818cf8'} strokeWidth="4" strokeLinecap="round"
+        strokeDasharray={`${circumference * progress} ${circumference}`}
+        transform={`rotate(-90 ${cx} ${cy})`} />
       <text x={cx} y={cy + 1} textAnchor="middle" dominantBaseline="middle"
-        fontSize="12" fontWeight="bold" fill="white" opacity="0.9"
-      >
+        fontSize="12" fontWeight="bold" fill="white" opacity="0.9">
         {progress >= 0.99 ? '✓' : `${Math.round(progress * 100)}%`}
       </text>
     </svg>
@@ -149,70 +109,93 @@ function HoldRing({ progress }: { progress: number }) {
 }
 
 // ---------------------------------------------------------------------------
+// Component
+// ---------------------------------------------------------------------------
 
-export default function GuidedCapture({ ws, boardSettings, onBoardChange }: Props) {
-  const [devices, setDevices]           = useState<CaptureDevice[]>([]);
-  const [scanning, setScanning]         = useState(false);
-  const [selectedIdx, setSelectedIdx]   = useState<number | null>(null);
-  const [resolution, setResolution]     = useState(RESOLUTIONS[3]); // 1080p default
-  const [framerate, setFramerate]       = useState(FRAMERATES[4]);  // 30 default
+export default function GuidedCapture({ ws, boardSettings, onCalibrationSent, selectedIdx, selectedDeviceName, detectedW, detectedH, detectedFps, lensSettings, cameraSettings }: Props) {
+  // ── Preview ───────────────────────────────────────────────────────────────
+  const [previewFrame, setPreviewFrame] = useState<string | null>(null);
+  const [previewing, setPreviewing]   = useState(false);
 
-  const [running, setRunning]           = useState(false);
-  const [liveFrame, setLiveFrame]       = useState<LiveFrame | null>(null);
-  const [actualSize, setActualSize]     = useState<[number, number]>([1920, 1080]);
-  const [flash, setFlash]               = useState(false);
+  // ── Capture ───────────────────────────────────────────────────────────────
+  const [running, setRunning]               = useState(false);
+  const [liveFrame, setLiveFrame]           = useState<LiveFrame | null>(null);
+  const [actualSize, setActualSize]         = useState<[number, number]>([1920, 1080]);
+  const [flash, setFlash]                   = useState(false);
   const [capturedFrames, setCapturedFrames] = useState<ScoredFrame[]>([]);
-  const [checklist, setChecklist]       = useState<PoseItem[]>([]);
+  const [checklist, setChecklist]           = useState<PoseItem[]>([]);
   const [checklistComplete, setChecklistComplete] = useState(false);
-  const [calibrating, setCalibrating]   = useState(false);
-  const [calibResult, setCalibResult]   = useState<CalibrationResult | null>(null);
+  const [calibrating, setCalibrating]       = useState(false);
+
+  // ── FL / Zoom ─────────────────────────────────────────────────────────────
+  const [flInput, setFlInput]           = useState('');
+  const [flGroups, setFlGroups]         = useState<FlGroup[]>([]);
+  const [activeFlIdx, setActiveFlIdx]   = useState<number | null>(null);
+  const [zoomResult, setZoomResult]     = useState<ZoomCalibResult | null>(null);
+  const [calibratingZoom, setCalibratingZoom] = useState(false);
+
+  // ── Zoom export ──────────────────────────────────────────────────────────
+  const [exportStatus, setExportStatus]       = useState<'idle'|'loading'|'success'|'error'>('idle');
+  const [exportPath, setExportPath]           = useState('');
 
   const canvasRef   = useRef<HTMLCanvasElement>(null);
   const flashTimer  = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Scan for devices on mount
+  // ── Auto-start preview ────────────────────────────────────────────────────
   useEffect(() => {
-    if (ws) scanDevices();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ws]);
+    if (!ws || ws.readyState !== WebSocket.OPEN || running || selectedIdx === null) return;
+    setPreviewing(true);
+    setPreviewFrame(null);
+    ws.send(JSON.stringify({ action: 'start_preview', device: selectedIdx }));
+    return () => {
+      setPreviewing(false);
+      setPreviewFrame(null);
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ action: 'stop_preview' }));
+    };
+  }, [selectedIdx, ws, running]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── WebSocket messages ────────────────────────────────────────────────────
   useEffect(() => {
     if (!ws) return;
     const handler = (e: MessageEvent) => {
       try {
         const msg = JSON.parse(e.data);
-
-        if (msg.action === 'device_list') {
-          setDevices(msg.devices ?? []);
-          setScanning(false);
-          // Auto-select first capture card, or first device
-          const first_card = (msg.devices as CaptureDevice[]).find(d => d.brand.is_capture_card);
-          const first_any  = (msg.devices as CaptureDevice[])[0];
-          const auto = first_card ?? first_any;
-          if (auto != null) setSelectedIdx(auto.index);
-
+        if (msg.action === 'preview_frame') {
+          setPreviewFrame(msg.frame);
+        } else if (msg.action === 'preview_stopped') {
+          setPreviewing(false); setPreviewFrame(null);
         } else if (msg.action === 'live_capture_started') {
           setActualSize([msg.actual_width, msg.actual_height]);
-
         } else if (msg.action === 'live_frame') {
           setLiveFrame(msg as LiveFrame);
-          if (msg.checklist) {
-            setChecklist(msg.checklist);
-            setChecklistComplete(msg.complete ?? false);
-          }
+          if (msg.checklist) { setChecklist(msg.checklist); setChecklistComplete(msg.complete ?? false); }
           if (msg.auto_captured) {
             setFlash(true);
             if (flashTimer.current) clearTimeout(flashTimer.current);
             flashTimer.current = setTimeout(() => setFlash(false), 500);
           }
-
         } else if (msg.action === 'live_capture_stopped') {
           setRunning(false);
-          setCapturedFrames(msg.scored_frames ?? []);
-
+          const frames: ScoredFrame[] = msg.scored_frames ?? [];
+          setCapturedFrames(frames);
+          // Save frames to the active FL group
+          setActiveFlIdx(prev => {
+            if (prev !== null) {
+              setFlGroups(gs => gs.map((g, i) =>
+                i === prev ? { ...g, frames, status: 'done' } : g
+              ));
+            }
+            return prev; // keep same activeFlIdx so UI shows "next FL" option
+          });
+          setLiveFrame(null);
         } else if (msg.action === 'calibrate_result') {
-          setCalibResult(msg);
           setCalibrating(false);
+        } else if (msg.action === 'zoom_calibrate_result') {
+          setZoomResult(msg as ZoomCalibResult);
+          setCalibratingZoom(false);
+        } else if (msg.action === 'export_result' && msg.format === 'ue5_ulens_zoom') {
+          setExportStatus(msg.success ? 'success' : 'error');
+          if (msg.success) setExportPath(msg.output_path);
         }
       } catch { /* ignore */ }
     };
@@ -220,40 +203,44 @@ export default function GuidedCapture({ ws, boardSettings, onBoardChange }: Prop
     return () => ws.removeEventListener('message', handler);
   }, [ws]);
 
-  // Draw corner overlay
+  // ── Canvas overlay ────────────────────────────────────────────────────────
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !liveFrame) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
-
     ctx.clearRect(0, 0, STREAM_W, STREAM_H);
+    const reqs = liveFrame.next_pose_reqs;
+    if (reqs && !liveFrame.complete) {
+      const cw = STREAM_W / 3, ch = STREAM_H / 3;
+      const isMatching = liveFrame.hold_progress > 0;
+      let x1: number, y1: number, x2: number, y2: number;
+      if (reqs.regions === null) {
+        x1 = 4; y1 = 4; x2 = STREAM_W - 4; y2 = STREAM_H - 4;
+      } else {
+        const gxs = reqs.regions.map(r => (r % 3) * cw);
+        const gys = reqs.regions.map(r => Math.floor(r / 3) * ch);
+        x1 = Math.min(...gxs); y1 = Math.min(...gys);
+        x2 = Math.max(...gxs) + cw; y2 = Math.max(...gys) + ch;
+      }
+      ctx.save(); ctx.setLineDash([6, 4]); ctx.lineWidth = 2;
+      ctx.strokeStyle = isMatching ? 'rgba(16,185,129,0.9)' : 'rgba(148,163,184,0.6)';
+      ctx.fillStyle   = isMatching ? 'rgba(16,185,129,0.08)' : 'rgba(148,163,184,0.05)';
+      ctx.fillRect(x1, y1, x2 - x1, y2 - y1);
+      ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+      ctx.restore();
+    }
     if (!liveFrame.found || !liveFrame.corners.length) return;
-
     const corners = liveFrame.corners;
     const cols = boardSettings.cols;
-
     ctx.fillStyle = '#10b981';
-    for (const [x, y] of corners) {
-      ctx.beginPath();
-      ctx.arc(x, y, 2.5, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
+    for (const [x, y] of corners) { ctx.beginPath(); ctx.arc(x, y, 2.5, 0, Math.PI * 2); ctx.fill(); }
     if (corners.length >= 4) {
-      const c0 = corners[0];
-      const c1 = corners[Math.min(cols - 1, corners.length - 1)];
-      const c2 = corners[corners.length - 1];
-      const c3 = corners[Math.max(0, corners.length - cols)];
-      ctx.strokeStyle = '#06b6d4';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(c0[0], c0[1]);
-      ctx.lineTo(c1[0], c1[1]);
-      ctx.lineTo(c2[0], c2[1]);
-      ctx.lineTo(c3[0], c3[1]);
-      ctx.closePath();
-      ctx.stroke();
+      const c0 = corners[0], c1 = corners[Math.min(cols - 1, corners.length - 1)];
+      const c2 = corners[corners.length - 1], c3 = corners[Math.max(0, corners.length - cols)];
+      ctx.strokeStyle = '#06b6d4'; ctx.lineWidth = 2; ctx.setLineDash([]);
+      ctx.beginPath(); ctx.moveTo(c0[0], c0[1]); ctx.lineTo(c1[0], c1[1]);
+      ctx.lineTo(c2[0], c2[1]); ctx.lineTo(c3[0], c3[1]); ctx.closePath(); ctx.stroke();
     }
   }, [liveFrame, boardSettings.cols]);
 
@@ -261,31 +248,38 @@ export default function GuidedCapture({ ws, boardSettings, onBoardChange }: Prop
   // Actions
   // ---------------------------------------------------------------------------
 
-  const scanDevices = () => {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    setScanning(true);
-    setDevices([]);
-    ws.send(JSON.stringify({ action: 'list_devices' }));
+  const addFl = (fl: number) => {
+    if (isNaN(fl) || fl <= 0 || flGroups.some(g => g.fl_mm === fl)) return;
+    const updated = [...flGroups, { fl_mm: fl, frames: [], status: 'pending' as const }].sort((a, b) => a.fl_mm - b.fl_mm);
+    setFlGroups(updated);
+    // Auto-select the new FL if nothing is currently selected
+    if (activeFlIdx === null) {
+      setActiveFlIdx(updated.findIndex(g => g.fl_mm === fl));
+    }
+  };
+
+  const removeFl = (fl_mm: number) => {
+    if (running) return;
+    setFlGroups(prev => prev.filter(g => g.fl_mm !== fl_mm));
+    setActiveFlIdx(null);
   };
 
   const startCapture = () => {
     if (!ws || ws.readyState !== WebSocket.OPEN || selectedIdx === null) return;
-    setCapturedFrames([]);
-    setCalibResult(null);
-    setLiveFrame(null);
-    setChecklist([]);
-    setChecklistComplete(false);
+    if (activeFlIdx === null) return;
+    setCapturedFrames([]); setLiveFrame(null);
+    setChecklist([]); setChecklistComplete(false);
     setRunning(true);
+    const saveDir = `captures/zoom_${flGroups[activeFlIdx].fl_mm}mm`;
     ws.send(JSON.stringify({
-      action:     'start_live_capture',
-      device:     selectedIdx,
-      width:      resolution.w,
-      height:     resolution.h,
-      fps:        framerate.fps,
-      board_cols: boardSettings.cols,
-      board_rows: boardSettings.rows,
-      save_dir:   'captures',
+      action: 'start_live_capture', device: selectedIdx,
+      width: detectedW, height: detectedH, fps: detectedFps,
+      board_cols: boardSettings.cols, board_rows: boardSettings.rows,
+      save_dir: saveDir,
+      lens_type: lensSettings.lensType,
+      squeeze_ratio: lensSettings.squeezeRatio,
     }));
+    setFlGroups(prev => prev.map((g, i) => i === activeFlIdx ? { ...g, status: 'capturing' } : g));
   };
 
   const stopCapture = () => {
@@ -299,30 +293,85 @@ export default function GuidedCapture({ ws, boardSettings, onBoardChange }: Prop
   };
 
   const runCalibration = () => {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN || activeFlIdx === null) return;
+    const frames = flGroups[activeFlIdx].frames;
+    onCalibrationSent(
+      actualSize,
+      frames.map((f, i) => ({ path: f.path, quality: f.quality, sharpness: f.sharpness, coverage: f.coverage, index: i })),
+    );
     setCalibrating(true);
     ws.send(JSON.stringify({
-      action:         'calibrate',
-      scored_frames:  capturedFrames,
-      board_cols:     boardSettings.cols,
-      board_rows:     boardSettings.rows,
-      square_size_mm: boardSettings.squareSizeMm,
-      image_size:     actualSize,
+      action: 'calibrate', scored_frames: frames,
+      board_cols: boardSettings.cols, board_rows: boardSettings.rows,
+      square_size_mm: boardSettings.squareSizeMm, image_size: actualSize,
+      lens_type: lensSettings.lensType,
+      squeeze_ratio: lensSettings.squeezeRatio,
+    }));
+  };
+
+  const runZoomCalibration = () => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const readyGroups = flGroups.filter(g => g.status === 'done' && g.frames.filter(f => f.quality !== 'fail').length >= MIN_FRAMES_PER_FL);
+    if (readyGroups.length < 2) return;
+    setCalibratingZoom(true);
+    ws.send(JSON.stringify({
+      action: 'calibrate_zoom',
+      fl_groups: readyGroups.map(g => ({ focal_length_mm: g.fl_mm, frames: g.frames })),
+      board_cols: boardSettings.cols, board_rows: boardSettings.rows,
+      square_size_mm: boardSettings.squareSizeMm, image_size: actualSize,
+      sensor_width_mm: parseFloat(cameraSettings.sensorWidthMm) || 0,
+      sensor_height_mm: parseFloat(cameraSettings.sensorHeightMm) || 0,
+      lens_type: lensSettings.lensType,
+      squeeze_ratio: lensSettings.squeezeRatio,
+    }));
+  };
+
+  const doZoomExport = async () => {
+    if (!ws || ws.readyState !== WebSocket.OPEN || !zoomResult) return;
+    let outputPath = 'calibration_zoom.ulens';
+    if (window.electronAPI?.showSaveDialog) {
+      const dlg = await window.electronAPI.showSaveDialog({
+        defaultPath: outputPath,
+        filters: [{ name: 'UE5 Lens File', extensions: ['ulens'] }, { name: 'All Files', extensions: ['*'] }],
+      });
+      if (dlg.canceled || !dlg.filePath) return;
+      outputPath = dlg.filePath;
+    }
+    setExportStatus('loading');
+    ws.send(JSON.stringify({
+      action: 'export', format: 'ue5_ulens_zoom', output_path: outputPath,
+      fl_results: zoomResult.fl_results, nodal_offsets_mm: zoomResult.nodal_offsets_mm,
+      image_size: actualSize, lens_name: cameraSettings.lensName.trim() || 'Lens',
+      sensor_width_mm: parseFloat(cameraSettings.sensorWidthMm) || 0,
+      sensor_height_mm: parseFloat(cameraSettings.sensorHeightMm) || 0,
+      lens_type: lensSettings.lensType,
+      squeeze_ratio: lensSettings.squeezeRatio,
     }));
   };
 
   // ---------------------------------------------------------------------------
-  // Derived values
+  // Derived
   // ---------------------------------------------------------------------------
 
-  const selectedDevice     = devices.find(d => d.index === selectedIdx) ?? null;
-  const frameCount         = liveFrame?.frame_count ?? capturedFrames.length;
-  const satisfiedCount     = liveFrame?.satisfied_count ?? checklist.filter(p => p.satisfied).length;
-  const totalPoses         = liveFrame?.total ?? 10;
-  const progressPct        = Math.min(100, (satisfiedCount / totalPoses) * 100);
-  const canCalibrate       = !running && capturedFrames.length >= MIN_GOOD_FOR_CALIB;
-  const nextHint           = liveFrame?.next_hint ?? '';
-  const displayChecklist   = running ? (liveFrame?.checklist ?? checklist) : checklist;
+  const frameCount       = liveFrame?.frame_count ?? capturedFrames.length;
+  const satisfiedCount   = liveFrame?.satisfied_count ?? checklist.filter(p => p.satisfied).length;
+  const totalPoses       = liveFrame?.total ?? 10;
+  const progressPct      = Math.min(100, (satisfiedCount / totalPoses) * 100);
+  const nextHint         = liveFrame?.next_hint ?? '';
+  const readyFlCount     = flGroups.filter(g => g.status === 'done' && g.frames.filter(f => f.quality !== 'fail').length >= MIN_FRAMES_PER_FL).length;
+  const canCalibrateZ    = !running && !calibratingZoom && readyFlCount >= 2;
+
+  const nextPendingFlIdx = flGroups.findIndex((g, i) => activeFlIdx !== null && i > activeFlIdx && g.status !== 'done');
+
+  // Current FL context label
+  const currentFl = activeFlIdx !== null ? flGroups[activeFlIdx]?.fl_mm : null;
+
+  // Single-FL calibration: exactly 1 FL is done with enough frames
+  const singleFlReady = activeFlIdx !== null
+    && flGroups[activeFlIdx]?.status === 'done'
+    && flGroups[activeFlIdx].frames.filter(f => f.quality !== 'fail').length >= MIN_FRAMES_PER_FL
+    && readyFlCount === 1;
+  const canCalibrateSingle = singleFlReady && !running && !calibrating;
 
   // ---------------------------------------------------------------------------
   // Render
@@ -331,319 +380,361 @@ export default function GuidedCapture({ ws, boardSettings, onBoardChange }: Prop
   return (
     <div className="space-y-4">
 
-      {/* ── Device selection row ─────────────────────────────────────── */}
-      <div className="rounded-xl bg-slate-800 border border-slate-700 p-4 space-y-3">
-        <div className="flex items-center justify-between">
-          <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
-            Capture Device
-          </h3>
-          <button
-            type="button"
-            onClick={scanDevices}
-            disabled={scanning || !ws || running}
-            className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-xs text-slate-300 transition-colors"
-          >
-            {scanning
-              ? <span className="inline-block w-3 h-3 border-2 border-slate-400 border-t-transparent rounded-full animate-spin" />
-              : '↺'}
-            {scanning ? 'Scanning…' : 'Detect'}
-          </button>
-        </div>
-
-        {/* Device list */}
-        {devices.length === 0 && !scanning && (
-          <p className="text-xs text-slate-500 italic">No devices found — press Detect</p>
-        )}
-        {devices.length > 0 && (
-          <div className="space-y-1.5">
-            {devices.map(dev => (
-              <button
-                type="button"
-                key={dev.index}
-                onClick={() => setSelectedIdx(dev.index)}
-                disabled={running}
-                className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg border text-left transition-colors ${
-                  selectedIdx === dev.index
-                    ? 'border-blue-500/60 bg-blue-500/10'
-                    : 'border-slate-700 bg-slate-700/50 hover:bg-slate-700'
-                } disabled:opacity-60`}
-              >
-                {/* Brand badge */}
-                <span className={`shrink-0 text-[10px] font-bold px-1.5 py-0.5 rounded border ${BRAND_COLOR[dev.brand.id] ?? BRAND_COLOR.generic}`}>
-                  {dev.brand.icon}
-                </span>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm text-slate-200 truncate">{dev.name}</p>
-                  <p className="text-[10px] text-slate-500">{dev.brand.name} — index {dev.index}</p>
-                </div>
-                {selectedIdx === dev.index && (
-                  <span className="shrink-0 text-blue-400 text-sm">✓</span>
-                )}
-              </button>
-            ))}
-          </div>
-        )}
-
-        {/* Resolution + board settings row */}
-        <div className="flex items-end gap-3 flex-wrap pt-1 border-t border-slate-700">
-          <label className="flex flex-col gap-1">
-            <span className="text-[11px] text-slate-500 uppercase tracking-wider">Resolution</span>
-            <select
-              value={resolution.label}
-              onChange={e => setResolution(RESOLUTIONS.find(r => r.label === e.target.value) ?? RESOLUTIONS[3])}
-              disabled={running}
-              className="bg-slate-700 border border-slate-600 rounded-lg px-2 py-1.5 text-sm text-slate-200 focus:outline-none focus:border-blue-500 disabled:opacity-50"
-            >
-              {RESOLUTIONS.map(r => (
-                <option key={r.label} value={r.label}>{r.label}</option>
-              ))}
-            </select>
-          </label>
-
-          <label className="flex flex-col gap-1">
-            <span className="text-[11px] text-slate-500 uppercase tracking-wider">Frame rate</span>
-            <select
-              value={framerate.label}
-              onChange={e => setFramerate(FRAMERATES.find(f => f.label === e.target.value) ?? FRAMERATES[4])}
-              disabled={running}
-              className="bg-slate-700 border border-slate-600 rounded-lg px-2 py-1.5 text-sm text-slate-200 focus:outline-none focus:border-blue-500 disabled:opacity-50"
-            >
-              {FRAMERATES.map(f => (
-                <option key={f.label} value={f.label}>{f.label}</option>
-              ))}
-            </select>
-          </label>
-
-          <div className="flex-1 min-w-[220px]">
-            <BoardPresetSelector
-              boardSettings={boardSettings}
-              onBoardChange={onBoardChange}
-              disabled={running}
-            />
-          </div>
-
-          <div className="flex gap-2 pb-0.5 ml-auto">
+      {/* ── Capture controls row ─────────────────────────────────────── */}
+      <div className="rounded-xl bg-slate-800 border border-slate-700 p-4">
+        <div className="flex items-center gap-3 flex-wrap">
+          {selectedDeviceName && (
+            <span className="text-xs text-slate-300 truncate max-w-[200px]" title={selectedDeviceName}>{selectedDeviceName}</span>
+          )}
+          {!selectedDeviceName && selectedIdx === null && (
+            <span className="text-xs text-slate-500 italic">No device — go to Settings</span>
+          )}
+          {lensSettings.lensType === 'anamorphic' ? (
+            <span className="flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1 rounded-lg border border-indigo-500/50 bg-indigo-500/15 text-indigo-300">
+              <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 inline-block" />
+              Anamorphic · {lensSettings.squeezeRatio}×
+            </span>
+          ) : (
+            <span className="flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1 rounded-lg border border-slate-600 bg-slate-700/60 text-slate-400">
+              <span className="w-1.5 h-1.5 rounded-full bg-slate-500 inline-block" />
+              Spherical
+            </span>
+          )}
+          {(previewFrame || running) && (
+            <span className="text-xs text-slate-400">{detectedW}×{detectedH} · {fmtFps(detectedFps)} fps</span>
+          )}
+          {running && (
+            <span className="flex items-center gap-1 text-xs text-emerald-400">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse inline-block" />Live
+              {currentFl && <span className="text-blue-300 font-semibold ml-1">{currentFl}mm</span>}
+            </span>
+          )}
+          <div className="flex gap-2 ml-auto">
             {!running ? (
-              <button
-                type="button"
-                onClick={startCapture}
-                disabled={!ws || selectedIdx === null}
-                className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 disabled:text-slate-500 text-white rounded-lg text-sm font-medium transition-colors"
-              >
-                Start Capture
+              <button type="button" onClick={startCapture}
+                disabled={!ws || selectedIdx === null || activeFlIdx === null}
+                title={activeFlIdx === null ? 'Add a focal length first' : undefined}
+                className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 disabled:text-slate-500 text-white rounded-lg text-sm font-medium transition-colors">
+                {activeFlIdx !== null
+                  ? `Capture at ${flGroups[activeFlIdx]?.fl_mm}mm`
+                  : 'Add a focal length first'}
               </button>
             ) : (
               <>
-                <button
-                  type="button"
-                  onClick={manualCapture}
-                  className="px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-sm font-medium transition-colors"
-                >
-                  Capture
-                </button>
-                <button
-                  type="button"
-                  onClick={stopCapture}
-                  className="px-3 py-2 bg-red-600/80 hover:bg-red-600 text-white rounded-lg text-sm font-medium transition-colors"
-                >
-                  Stop
-                </button>
+                <button type="button" onClick={manualCapture}
+                  className="px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-sm font-medium transition-colors">Capture</button>
+                <button type="button" onClick={stopCapture}
+                  className="px-3 py-2 bg-red-600/80 hover:bg-red-600 text-white rounded-lg text-sm font-medium transition-colors">Stop</button>
               </>
             )}
           </div>
         </div>
-
-        {/* Active device info bar */}
-        {running && selectedDevice && (
-          <div className="flex items-center gap-2 text-[11px] text-slate-400 pt-1 border-t border-slate-700">
-            <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${BRAND_COLOR[selectedDevice.brand.id] ?? BRAND_COLOR.generic}`}>
-              {selectedDevice.brand.icon}
-            </span>
-            <span className="truncate">{selectedDevice.name}</span>
-            <span className="text-slate-600">·</span>
-            <span>{actualSize[0]}×{actualSize[1]} · {framerate.label} fps</span>
-            <span className="ml-auto flex items-center gap-1 text-emerald-400">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse inline-block" />
-              Live
-            </span>
-          </div>
-        )}
       </div>
 
-      {/* ── Video + checklist ────────────────────────────────────────── */}
+      {/* ── FL setup bar ─────────────────────────────────────────────── */}
+      <div className="rounded-xl bg-slate-800 border border-slate-700 p-4 space-y-2">
+        <div className="flex items-center gap-3 flex-wrap">
+          <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider shrink-0">Focal Lengths</span>
+          <div className="flex gap-1 flex-wrap">
+            {SNAP_FLS.map(fl => (
+              <button key={fl} type="button" onClick={() => addFl(fl)}
+                disabled={running || flGroups.some(g => g.fl_mm === fl)}
+                className="px-2 py-0.5 rounded text-[11px] bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-slate-300 transition-colors">
+                {fl}
+              </button>
+            ))}
+          </div>
+          <div className="flex items-center gap-1 ml-auto">
+            <input type="number" min={1} placeholder="custom mm" value={flInput}
+              onChange={e => setFlInput(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') { addFl(parseFloat(flInput)); setFlInput(''); } }}
+              className="w-24 bg-slate-700 border border-slate-600 rounded px-2 py-1 text-xs text-slate-200 focus:outline-none focus:border-blue-500" />
+            <button type="button" onClick={() => { addFl(parseFloat(flInput)); setFlInput(''); }} disabled={running}
+              className="px-2 py-1 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded text-xs transition-colors">+</button>
+          </div>
+        </div>
+        <p className="text-[11px] text-slate-500">
+          Keep the camera at the same working distance for all focal lengths — only rotate the zoom ring. Aim for {MIN_FRAMES_PER_FL}+ frames each.
+        </p>
+      </div>
+
+      {/* ── Main area: video + checklist/FL-list ─────────────────────── */}
       <div className="flex gap-4 items-start flex-wrap lg:flex-nowrap">
 
-        {/* Left: video + hint */}
+        {/* Left: video */}
         <div className="flex-shrink-0 space-y-3 w-full lg:w-[640px]">
-
-          {/* Video — fixed 16:9 aspect ratio matching STREAM_W/STREAM_H (640×360) */}
           <div className="rounded-xl overflow-hidden bg-slate-900 border border-slate-700 relative aspect-video">
             {liveFrame ? (
-              <img
-                src={`data:image/jpeg;base64,${liveFrame.frame}`}
-                alt="Live camera feed"
-                className="absolute inset-0 w-full h-full object-fill"
-                draggable={false}
-              />
+              <img src={`data:image/jpeg;base64,${liveFrame.frame}`} alt="Live" className="absolute inset-0 w-full h-full object-fill" draggable={false} />
+            ) : previewFrame ? (
+              <img src={`data:image/jpeg;base64,${previewFrame}`} alt="Preview" className="absolute inset-0 w-full h-full object-fill" draggable={false} />
             ) : (
               <div className="absolute inset-0 flex items-center justify-center text-slate-600 text-sm">
-                {running ? 'Connecting to camera…' : 'Press Start Capture'}
+                {previewing || running ? 'Connecting to camera…' : selectedIdx !== null ? 'Loading preview…' : 'No camera selected'}
               </div>
             )}
-
-            <canvas
-              ref={canvasRef}
-              width={STREAM_W}
-              height={STREAM_H}
-              className="absolute inset-0 w-full h-full pointer-events-none"
-            />
-
+            <canvas ref={canvasRef} width={STREAM_W} height={STREAM_H} className="absolute inset-0 w-full h-full pointer-events-none" />
             <div className={`absolute inset-0 bg-white pointer-events-none transition-opacity duration-500 ${flash ? 'opacity-60' : 'opacity-0'}`} />
-
-            {/* Hold-still countdown ring — appears when board is in a matching pose */}
-            {liveFrame && liveFrame.hold_progress > 0 && !liveFrame.complete && (
-              <HoldRing progress={liveFrame.hold_progress} />
-            )}
-
-            {liveFrame?.found && (
-              <div className={`absolute top-2 right-2 text-[10px] font-bold px-2 py-1 rounded-lg border capitalize ${QUALITY_COLOR[liveFrame.quality] ?? ''}`}>
-                {liveFrame.quality}
+            {liveFrame && liveFrame.hold_progress > 0 && !liveFrame.complete && <HoldRing progress={liveFrame.hold_progress} />}
+            {liveFrame && (
+              <div className={`absolute top-2 right-2 text-[10px] font-bold px-2 py-1 rounded-lg border capitalize ${liveFrame.found ? (QUALITY_COLOR[liveFrame.quality] ?? '') : 'text-slate-500 border-slate-600/40 bg-black/40'}`}>
+                {liveFrame.found ? liveFrame.quality : 'no chart'}
               </div>
             )}
-
-            {running && (
-              <div className="absolute top-2 left-2 text-[10px] font-bold px-2 py-1 rounded-lg bg-black/60 text-white">
-                {frameCount} captured
-              </div>
-            )}
-
+            {running && <div className="absolute top-2 left-2 text-[10px] font-bold px-2 py-1 rounded-lg bg-black/60 text-white">{frameCount} captured{currentFl ? ` · ${currentFl}mm` : ''}</div>}
+            {!running && previewFrame && <div className="absolute top-2 left-2 text-[10px] font-bold px-2 py-1 rounded-lg bg-black/50 text-slate-400 tracking-wider">PREVIEW</div>}
             {checklistComplete && running && (
               <div className="absolute inset-0 flex items-center justify-center bg-black/50">
                 <div className="bg-emerald-600 text-white rounded-xl px-6 py-4 text-center shadow-2xl">
                   <div className="text-2xl mb-1">All poses captured!</div>
-                  <div className="text-sm opacity-90">Press Stop to calibrate</div>
+                  <div className="text-sm opacity-90">Press Stop to move to next focal length</div>
                 </div>
               </div>
             )}
           </div>
 
-          {/* Progress */}
+          {/* Progress bar */}
           <div className="space-y-1">
             <div className="flex justify-between text-xs text-slate-400">
               <span>{satisfiedCount} / {totalPoses} poses</span>
               <span className="text-slate-500">{frameCount} frames</span>
             </div>
             <div className="h-2 bg-slate-700 rounded-full overflow-hidden">
-              <progress
-                value={progressPct}
-                max={100}
-                className={`block w-full h-full [appearance:none] [&::-webkit-progress-bar]:bg-transparent [&::-webkit-progress-value]:rounded-full [&::-webkit-progress-value]:transition-all ${
-                  checklistComplete
-                    ? '[&::-webkit-progress-value]:bg-emerald-500 [&::-moz-progress-bar]:bg-emerald-500'
-                    : '[&::-webkit-progress-value]:bg-blue-500  [&::-moz-progress-bar]:bg-blue-500'
-                }`}
-              />
+              <progress value={progressPct} max={100}
+                className={`block w-full h-full [appearance:none] [&::-webkit-progress-bar]:bg-transparent [&::-webkit-progress-value]:rounded-full [&::-webkit-progress-value]:transition-all ${checklistComplete ? '[&::-webkit-progress-value]:bg-emerald-500 [&::-moz-progress-bar]:bg-emerald-500' : '[&::-webkit-progress-value]:bg-blue-500  [&::-moz-progress-bar]:bg-blue-500'}`} />
             </div>
           </div>
 
-          {/* Next hint */}
+          {/* Next hint + chips */}
           {running && nextHint && (
-            <div className={`rounded-lg border px-3 py-3 flex items-center gap-4 ${
-              checklistComplete
-                ? 'bg-emerald-500/10 border-emerald-500/30'
-                : 'bg-slate-800 border-slate-700'
-            }`}>
-              {/* Large pose diagram */}
-              {!checklistComplete && liveFrame?.next_pose_id && (
-                <PoseDiagram poseId={liveFrame.next_pose_id} size="lg" />
-              )}
-
+            <div className={`rounded-lg border px-3 py-3 flex items-center gap-4 ${checklistComplete ? 'bg-emerald-500/10 border-emerald-500/30' : 'bg-slate-800 border-slate-700'}`}>
+              {!checklistComplete && liveFrame?.next_pose_id && <PoseDiagram poseId={liveFrame.next_pose_id} size="lg" />}
               <div className="flex-1 min-w-0">
                 <p className={`text-sm font-semibold ${checklistComplete ? 'text-emerald-300' : 'text-slate-200'}`}>
                   {checklistComplete ? '✓ All poses captured!' : nextHint}
                 </p>
-                {liveFrame?.message && (
-                  <p className="text-xs text-slate-500 mt-0.5">{liveFrame.message}</p>
+                {!checklistComplete && liveFrame?.match_status && (
+                  <div className="flex gap-1.5 mt-2 flex-wrap">
+                    {(['position_ok', 'tilt_ok', 'size_ok'] as const).map(key => {
+                      const ok = liveFrame.match_status![key];
+                      const label = key === 'position_ok' ? 'Position' : key === 'tilt_ok' ? 'Tilt' : 'Size';
+                      return (
+                        <span key={key} className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${ok ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300' : 'bg-slate-700/60 border-slate-600 text-slate-400'}`}>
+                          {ok ? '✓' : '·'} {label}
+                        </span>
+                      );
+                    })}
+                  </div>
                 )}
-                {checklistComplete && (
-                  <p className="text-xs text-slate-400 mt-0.5">Press Stop to run calibration</p>
-                )}
+                {!checklistComplete && liveFrame && !liveFrame.found && <p className="text-xs text-slate-500 mt-1.5">Point the chart at the camera</p>}
+                {checklistComplete && <p className="text-xs text-slate-400 mt-0.5">Press Stop to move to next focal length</p>}
               </div>
+            </div>
+          )}
+
+          {/* Post-FL-capture hint */}
+          {!running && activeFlIdx !== null && flGroups[activeFlIdx]?.status === 'done' && nextPendingFlIdx >= 0 && (
+            <div className="flex items-center gap-2 text-xs text-slate-400">
+              <span className="text-emerald-400">✓ {flGroups[activeFlIdx].frames.filter(f => f.quality !== 'fail').length} frames saved</span>
+              <span>·</span>
+              <span>Select <span className="text-blue-300 font-semibold">{flGroups[nextPendingFlIdx].fl_mm}mm</span> in the list to continue</span>
+            </div>
+          )}
+
+          {/* Single-FL: Run Calibration button */}
+          {singleFlReady && !running && (
+            <div className="flex items-center gap-3">
+              <button type="button" onClick={runCalibration} disabled={!canCalibrateSingle || calibrating}
+                className={`px-5 py-2.5 rounded-lg text-sm font-semibold transition-colors ${canCalibrateSingle && !calibrating ? 'bg-blue-600 hover:bg-blue-500 text-white' : 'bg-slate-700 text-slate-500 cursor-not-allowed'}`}>
+                {calibrating
+                  ? 'Calibrating…'
+                  : `Run Calibration (${flGroups[activeFlIdx!].frames.filter(f => f.quality !== 'fail').length} frames)`}
+              </button>
+              {calibrating && <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />}
+              {checklistComplete && !calibrating && <span className="text-xs text-emerald-400">All 10 poses captured — ready!</span>}
             </div>
           )}
         </div>
 
-        {/* Right: pose checklist */}
-        {displayChecklist.length > 0 && (
-          <div className="flex-1 min-w-[220px]">
-            <div className="rounded-xl bg-slate-800 border border-slate-700 p-4">
-              <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">
-                Required Poses
-              </h3>
-              <div className="space-y-2">
-                {displayChecklist.map((pose) => (
-                  <div
-                    key={pose.id}
-                    className={`flex items-center gap-3 px-2 py-2 rounded-lg text-sm transition-colors ${
-                      pose.satisfied
-                        ? 'bg-emerald-500/10 border border-emerald-500/20'
-                        : 'bg-slate-700/50 border border-transparent'
-                    }`}
-                  >
-                    {/* Small pose diagram */}
-                    <PoseDiagram poseId={pose.id} size="sm" satisfied={pose.satisfied} />
+        {/* Right: pose checklist + FL step list */}
+        <div className="flex-1 min-w-[220px] space-y-3">
 
-                    <div className="min-w-0 flex-1">
-                      <p className={`text-xs font-semibold leading-tight ${pose.satisfied ? 'text-emerald-300' : 'text-slate-300'}`}>
-                        {pose.name}
-                      </p>
-                      {!pose.satisfied && (
-                        <p className="text-[10px] text-slate-500 mt-0.5 leading-snug">{pose.hint}</p>
-                      )}
-                    </div>
+          {/* Pose checklist — 5-per-row grid, 2 rows for 10 poses */}
+          {(running ? (liveFrame?.checklist ?? checklist) : checklist).length > 0 && (
+            <div className="rounded-xl bg-slate-800 border border-slate-700 p-4">
+              <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Required Poses</h3>
+              <div className="grid grid-cols-5 gap-2">
+                {(running ? (liveFrame?.checklist ?? checklist) : checklist).map(pose => (
+                  <div key={pose.id} title={pose.satisfied ? pose.name : `${pose.name}: ${pose.hint}`}
+                    className={`flex flex-col items-center gap-1 p-2 rounded-lg border transition-colors ${
+                      pose.satisfied
+                        ? 'bg-emerald-500/10 border-emerald-500/20'
+                        : 'bg-slate-700/50 border-transparent'
+                    }`}>
+                    <PoseDiagram poseId={pose.id} size="sm" satisfied={pose.satisfied} />
+                    <p className={`text-[9px] font-semibold text-center leading-tight line-clamp-2 ${
+                      pose.satisfied ? 'text-emerald-300' : 'text-slate-400'
+                    }`}>{pose.name}</p>
+                    {pose.satisfied && (
+                      <span className="text-[9px] text-emerald-400">✓</span>
+                    )}
                   </div>
                 ))}
               </div>
             </div>
+          )}
+
+          {/* FL step list */}
+          <div className="rounded-xl bg-slate-800 border border-slate-700 p-4 space-y-3">
+            <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Focal Length Steps</h3>
+
+            {flGroups.length === 0 ? (
+              <p className="text-xs text-slate-500 italic">Add focal lengths above</p>
+            ) : (
+              <div className="space-y-2">
+                {flGroups.map((g, i) => {
+                  const goodFrames = g.frames.filter(f => f.quality !== 'fail').length;
+                  const ready      = g.status === 'done' && goodFrames >= MIN_FRAMES_PER_FL;
+                  const isActive   = activeFlIdx === i;
+                  const isCapturing = isActive && running;
+                  return (
+                    <div key={g.fl_mm} onClick={() => !running && setActiveFlIdx(i)}
+                      className={`flex items-center gap-3 px-3 py-2.5 rounded-lg border cursor-pointer transition-colors ${
+                        isCapturing ? 'bg-blue-500/15 border-blue-500/40' :
+                        isActive    ? 'bg-slate-700/80 border-slate-600' :
+                        ready       ? 'bg-emerald-500/10 border-emerald-500/20' :
+                                      'bg-slate-700/50 border-transparent hover:bg-slate-700'
+                      }`}>
+                      <span className={`text-base leading-none ${ready ? 'text-emerald-400' : isCapturing ? 'text-blue-400' : isActive ? 'text-slate-400' : 'text-slate-600'}`}>
+                        {ready ? '✓' : isCapturing ? '●' : '○'}
+                      </span>
+                      <div className="flex-1 min-w-0">
+                        <span className={`text-sm font-semibold ${ready ? 'text-emerald-300' : isActive ? 'text-blue-300' : 'text-slate-300'}`}>
+                          {g.fl_mm} mm
+                        </span>
+                        {g.status === 'done' && <span className="ml-2 text-[10px] text-slate-500">{goodFrames} frames</span>}
+                        {g.status === 'pending' && !isActive && <span className="ml-2 text-[10px] text-slate-600">pending</span>}
+                        {isActive && !running && g.status !== 'done' && <span className="ml-2 text-[10px] text-blue-400">ready to capture</span>}
+                        {isCapturing && <span className="ml-2 text-[10px] text-blue-400">capturing…</span>}
+                      </div>
+                      {!running && (
+                        <button type="button" onClick={e => { e.stopPropagation(); removeFl(g.fl_mm); }}
+                          className="text-slate-600 hover:text-red-400 text-sm transition-colors" title="Remove">×</button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Capture controls for the selected FL */}
+            {activeFlIdx !== null && flGroups[activeFlIdx] && (
+              <div className="pt-3 border-t border-slate-700 space-y-2">
+                <p className="text-[10px] text-slate-500 uppercase tracking-wider font-semibold">
+                  {flGroups[activeFlIdx].fl_mm}mm
+                </p>
+                {!running ? (
+                  <button type="button" onClick={startCapture}
+                    disabled={!ws || selectedIdx === null}
+                    className="w-full px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 disabled:text-slate-500 text-white rounded-lg text-sm font-medium transition-colors">
+                    {flGroups[activeFlIdx].status === 'done'
+                      ? `Re-capture ${flGroups[activeFlIdx].fl_mm}mm`
+                      : `Start Capture at ${flGroups[activeFlIdx].fl_mm}mm`}
+                  </button>
+                ) : (
+                  <div className="flex gap-2">
+                    <button type="button" onClick={manualCapture}
+                      className="flex-1 px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-sm font-medium transition-colors">Capture</button>
+                    <button type="button" onClick={stopCapture}
+                      className="flex-1 px-3 py-2 bg-red-600/80 hover:bg-red-600 text-white rounded-lg text-sm font-medium transition-colors">Stop</button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Zoom calibration button (≥2 FLs done) */}
+            {flGroups.length >= 2 && (
+              <div className="pt-3 border-t border-slate-700">
+                {readyFlCount >= 2 ? (
+                  <button type="button" onClick={runZoomCalibration} disabled={!canCalibrateZ}
+                    className={`w-full px-4 py-2.5 rounded-lg text-sm font-semibold transition-colors ${canCalibrateZ ? 'bg-blue-600 hover:bg-blue-500 text-white' : 'bg-slate-700 text-slate-500 cursor-not-allowed'}`}>
+                    {calibratingZoom ? 'Calibrating…' : `Run Zoom Calibration (${readyFlCount} FLs)`}
+                  </button>
+                ) : (
+                  <p className="text-xs text-slate-500 text-center">
+                    Capture {Math.max(0, 2 - readyFlCount)} more FL{readyFlCount < 1 ? 's' : ''} to enable calibration
+                  </p>
+                )}
+                {calibratingZoom && <div className="flex justify-center mt-2"><div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" /></div>}
+              </div>
+            )}
           </div>
-        )}
+        </div>
       </div>
 
-      {/* ── Calibrate button ─────────────────────────────────────────── */}
-      {!running && capturedFrames.length > 0 && (
-        <div className="flex items-center gap-3">
-          <button
-            type="button"
-            onClick={runCalibration}
-            disabled={!canCalibrate || calibrating}
-            className={`px-5 py-2.5 rounded-lg text-sm font-semibold transition-colors ${
-              canCalibrate && !calibrating
-                ? 'bg-blue-600 hover:bg-blue-500 text-white'
-                : 'bg-slate-700 text-slate-500 cursor-not-allowed'
-            }`}
-          >
-            {calibrating
-              ? 'Calibrating…'
-              : canCalibrate
-              ? `Run Calibration (${capturedFrames.length} frames)`
-              : `Need ${MIN_GOOD_FOR_CALIB - capturedFrames.length} more frames`}
-          </button>
-          {calibrating && (
-            <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
-          )}
-          {checklistComplete && !calibrating && (
-            <span className="text-xs text-emerald-400">All 10 poses captured — ready!</span>
-          )}
-        </div>
-      )}
+      {/* ── Zoom calibration results ──────────────────────────────────── */}
+      {zoomResult && (
+        <div className="rounded-xl bg-slate-800 border border-slate-700 p-5 space-y-5">
+          <h2 className="text-sm font-semibold text-slate-300 tracking-wide uppercase">Zoom Calibration Results</h2>
 
-      {/* ── Results ──────────────────────────────────────────────────── */}
-      {calibResult && (
-        <ResultPanel
-          result={calibResult}
-          imageSize={actualSize}
-          ws={ws}
-        />
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-slate-500 uppercase tracking-wider border-b border-slate-700">
+                  <th className="text-left pb-2 pr-4">FL (mm)</th>
+                  <th className="text-right pb-2 pr-4">RMS</th>
+                  <th className="text-right pb-2 pr-4">f (px)</th>
+                  <th className="text-right pb-2 pr-4">f (mm)</th>
+                  <th className="text-right pb-2 pr-4">k1</th>
+                  <th className="text-right pb-2 pr-4">k2</th>
+                  <th className="text-right pb-2 pr-4">Nodal &#916;</th>
+                  <th className="text-right pb-2">Quality</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-700/50">
+                {zoomResult.fl_results.map(r => {
+                  const nz = zoomResult.nodal_offsets_mm[String(r.focal_length_mm)];
+                  return (
+                    <tr key={r.focal_length_mm} className={r.error ? 'opacity-50' : ''}>
+                      <td className="py-2 pr-4 font-semibold text-slate-200">{r.focal_length_mm}</td>
+                      <td className={`py-2 pr-4 text-right font-mono tabular-nums ${r.rms == null ? 'text-red-400' : r.rms < 0.5 ? 'text-emerald-400' : r.rms < 1.0 ? 'text-yellow-400' : 'text-red-400'}`}>
+                        {r.rms != null ? r.rms.toFixed(3) : '—'}
+                      </td>
+                      <td className="py-2 pr-4 text-right font-mono tabular-nums text-slate-300">{r.fx_px ? r.fx_px.toFixed(0) : '—'}</td>
+                      <td className="py-2 pr-4 text-right font-mono tabular-nums text-slate-400">{r.focal_length_computed_mm ? r.focal_length_computed_mm.toFixed(1) : '—'}</td>
+                      <td className="py-2 pr-4 text-right font-mono tabular-nums text-slate-300">{r.dist_coeffs?.[0] != null ? r.dist_coeffs[0].toFixed(4) : '—'}</td>
+                      <td className="py-2 pr-4 text-right font-mono tabular-nums text-slate-300">{r.dist_coeffs?.[1] != null ? r.dist_coeffs[1].toFixed(4) : '—'}</td>
+                      <td className="py-2 pr-4 text-right font-mono tabular-nums text-slate-400">{nz != null ? `${nz >= 0 ? '+' : ''}${nz.toFixed(1)} mm` : '—'}</td>
+                      <td className={`py-2 text-right capitalize ${CONFIDENCE_COLOR[r.confidence] ?? 'text-slate-500'}`}>{r.error ? 'error' : (r.confidence ?? '—')}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          <p className="text-[11px] text-slate-500 leading-relaxed">
+            Nodal &#916; = estimated optical-centre shift along Z-axis relative to the shortest focal length.
+          </p>
+
+          {/* Export */}
+          <div className="pt-3 border-t border-slate-700 space-y-3">
+            <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Export UE5 .ulens (Zoom)</h3>
+            {(!cameraSettings.sensorWidthMm || !cameraSettings.lensName) && (
+              <p className="text-[11px] text-yellow-500/80">Set sensor dimensions and lens name in Settings for accurate export.</p>
+            )}
+            <button type="button" onClick={doZoomExport} disabled={exportStatus === 'loading' || !ws}
+              className={`px-5 py-2.5 rounded-lg text-sm font-semibold transition-colors ${
+                exportStatus === 'success' ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-400' :
+                exportStatus === 'error'   ? 'bg-red-500/10 border border-red-500/30 text-red-400' :
+                exportStatus === 'loading' ? 'bg-slate-700 text-slate-400 cursor-wait border border-slate-600' :
+                                             'bg-blue-600 hover:bg-blue-500 text-white'
+              }`}>
+              {exportStatus === 'loading' ? 'Exporting…' : exportStatus === 'success' ? 'Exported' : exportStatus === 'error' ? 'Export failed' : 'Export UE5 .ulens (multi-FL)'}
+            </button>
+            {exportPath && <p className="text-[10px] text-slate-500 font-mono truncate" title={exportPath}>{exportPath}</p>}
+          </div>
+        </div>
       )}
     </div>
   );

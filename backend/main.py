@@ -14,10 +14,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi import WebSocket, WebSocketDisconnect
 
 from calibrator import run_calibration
-from capture_device import enumerate_capture_devices
-from exporter import export_json, export_opencv_xml, export_stmap_exr, export_ue5_ulens
+from capture_device import enumerate_capture_devices, open_capture, read_actual_size, read_actual_fps
+from exporter import export_json, export_opencv_xml, export_stmap_exr, export_ue5_ulens, export_ue5_ulens_zoom
+from zoom_calibrator import run_zoom_calibration
 from frame_scorer import score_frame
-from live_capture import run_live_capture
+from live_capture import run_live_capture, run_preview
 
 app = FastAPI()
 app.add_middleware(
@@ -78,6 +79,7 @@ async def _handle_calibrate(websocket: WebSocket, message: dict) -> None:
     board_rows: int = int(message.get("board_rows", 6))
     square_size_mm: float = float(message.get("square_size_mm", 25.0))
     image_size: tuple = tuple(message.get("image_size", [1920, 1080]))
+    squeeze_ratio: float = float(message.get("squeeze_ratio", 1.0))
     usable_count = sum(1 for f in scored_frames if f.get("quality") != "fail")
     await websocket.send_text(json.dumps({
         "action": "calibrate_progress",
@@ -86,16 +88,42 @@ async def _handle_calibrate(websocket: WebSocket, message: dict) -> None:
     }))
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(
-        _executor, run_calibration, scored_frames, board_cols, board_rows, square_size_mm, image_size,
+        _executor, run_calibration, scored_frames, board_cols, board_rows, square_size_mm, image_size, squeeze_ratio,
     )
     await websocket.send_text(json.dumps({"action": "calibrate_result", **result}))
 
 
+async def _handle_calibrate_zoom(websocket: WebSocket, message: dict) -> None:
+    fl_groups:      list  = message.get("fl_groups", [])
+    board_cols:     int   = int(message.get("board_cols", 9))
+    board_rows:     int   = int(message.get("board_rows", 6))
+    square_size_mm: float = float(message.get("square_size_mm", 25.0))
+    image_size:     tuple = tuple(message.get("image_size", [1920, 1080]))
+    sensor_width_mm:  float = float(message.get("sensor_width_mm", 0.0))
+    sensor_height_mm: float = float(message.get("sensor_height_mm", 0.0))
+    squeeze_ratio:    float = float(message.get("squeeze_ratio", 1.0))
+
+    total_frames = sum(len(g.get("frames", [])) for g in fl_groups)
+    await websocket.send_text(json.dumps({
+        "action":  "zoom_calibrate_progress",
+        "status":  "running",
+        "message": f"Running zoom calibration across {len(fl_groups)} focal lengths ({total_frames} frames)…",
+    }))
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        _executor, run_zoom_calibration,
+        fl_groups, board_cols, board_rows, square_size_mm, image_size,
+        sensor_width_mm, sensor_height_mm, squeeze_ratio,
+    )
+    await websocket.send_text(json.dumps({"action": "zoom_calibrate_result", **result}))
+
+
 _EXPORT_FORMATS = {
-    "opencv_xml": export_opencv_xml,
-    "json":       export_json,
-    "stmap_exr":  export_stmap_exr,
-    "ue5_ulens":  export_ue5_ulens,
+    "opencv_xml":     export_opencv_xml,
+    "json":           export_json,
+    "stmap_exr":      export_stmap_exr,
+    "ue5_ulens":      export_ue5_ulens,
+    "ue5_ulens_zoom": export_ue5_ulens_zoom,
 }
 
 
@@ -115,13 +143,32 @@ async def _handle_export(websocket: WebSocket, message: dict) -> None:
             "error": f"Unknown format '{fmt}'. Choose from: {list(_EXPORT_FORMATS)}",
         }))
         return
+    squeeze_ratio: float = float(message.get("squeeze_ratio", 1.0))
+    lens_type: str = message.get("lens_type", "spherical")
+
     loop = asyncio.get_event_loop()
     if fmt == "json":
-        fn = lambda: export_json(output_path, camera_matrix, dist_coeffs, fov_x, fov_y, rms, metadata)
+        fn = lambda: export_json(output_path, camera_matrix, dist_coeffs, fov_x, fov_y, rms, metadata,
+                                 squeeze_ratio=squeeze_ratio, lens_type=lens_type)
     elif fmt == "opencv_xml":
         fn = lambda: export_opencv_xml(output_path, camera_matrix, dist_coeffs, fov_x, fov_y, image_size)
     elif fmt == "stmap_exr":
-        fn = lambda: export_stmap_exr(output_path, camera_matrix, dist_coeffs, image_size)
+        fn = lambda: export_stmap_exr(output_path, camera_matrix, dist_coeffs, image_size,
+                                      squeeze_ratio=squeeze_ratio)
+    elif fmt == "ue5_ulens_zoom":
+        fl_results       = message.get("fl_results", [])
+        nodal_offsets_mm = message.get("nodal_offsets_mm", {})
+        lens_name        = message.get("lens_name", "Lens")
+        sensor_width_mm  = float(message.get("sensor_width_mm",  0.0))
+        sensor_height_mm = float(message.get("sensor_height_mm", 0.0))
+        fn = lambda: export_ue5_ulens_zoom(
+            output_path, fl_results, image_size, nodal_offsets_mm,
+            lens_name=lens_name,
+            sensor_width_mm=sensor_width_mm,
+            sensor_height_mm=sensor_height_mm,
+            squeeze_ratio=squeeze_ratio,
+            lens_type=lens_type,
+        )
     else:
         lens_name        = message.get("lens_name", "Lens")
         sensor_width_mm  = float(message.get("sensor_width_mm", 0.0))
@@ -131,6 +178,8 @@ async def _handle_export(websocket: WebSocket, message: dict) -> None:
             lens_name=lens_name,
             sensor_width_mm=sensor_width_mm,
             sensor_height_mm=sensor_height_mm,
+            squeeze_ratio=squeeze_ratio,
+            lens_type=lens_type,
         )
     result = await loop.run_in_executor(_executor, fn)
     await websocket.send_text(json.dumps({"action": "export_result", "format": fmt, **result}))
@@ -169,6 +218,47 @@ async def websocket_endpoint(websocket: WebSocket):
     stop_event   = asyncio.Event()
     manual_event = asyncio.Event()
 
+    preview_task: Optional[asyncio.Task] = None
+    preview_stop_event = asyncio.Event()
+
+    # Shared camera — kept open across preview↔capture transitions to avoid
+    # the 2-4 second DirectShow reopen delay.
+    # FPS is measured once on first open and cached.
+    shared_cap: Optional[cv2.VideoCapture] = None
+    shared_cap_device: Optional[int] = None
+    shared_cap_fps: float = 30.0
+    shared_cap_w: int = 1920
+    shared_cap_h: int = 1080
+
+    loop = asyncio.get_event_loop()
+
+    async def _ensure_cap(message: dict):
+        nonlocal shared_cap, shared_cap_device, shared_cap_fps, shared_cap_w, shared_cap_h
+        device_raw = message.get("device", 0)
+        device = int(device_raw) if str(device_raw).isdigit() else device_raw
+        width  = int(message.get("width",  1920))
+        height = int(message.get("height", 1080))
+        fps    = int(message.get("fps",    30))
+        # Reuse if same device and still open
+        if shared_cap is not None and shared_cap.isOpened() and shared_cap_device == device:
+            return shared_cap
+        # Close old cap if different device
+        if shared_cap is not None:
+            await loop.run_in_executor(_executor, shared_cap.release)
+        cap = await loop.run_in_executor(
+            _executor, lambda: open_capture(device, width, height, fps)
+        )
+        if cap is None or not cap.isOpened():
+            shared_cap = None
+            shared_cap_device = None
+            return None
+        # Measure fps once here so preview/capture never need to do it
+        shared_cap_w, shared_cap_h = await loop.run_in_executor(_executor, read_actual_size, cap)
+        shared_cap_fps = await loop.run_in_executor(_executor, read_actual_fps, cap)
+        shared_cap = cap
+        shared_cap_device = device
+        return shared_cap
+
     try:
         while True:
             raw = await websocket.receive_text()
@@ -181,7 +271,6 @@ async def websocket_endpoint(websocket: WebSocket):
             action = message.get("action")
 
             if action == "list_devices":
-                loop = asyncio.get_event_loop()
                 devices = await loop.run_in_executor(_executor, enumerate_capture_devices)
                 await websocket.send_text(json.dumps({
                     "action": "device_list",
@@ -191,18 +280,43 @@ async def websocket_endpoint(websocket: WebSocket):
                 await _handle_score_frames(websocket, message)
             elif action == "calibrate":
                 await _handle_calibrate(websocket, message)
+            elif action == "calibrate_zoom":
+                await _handle_calibrate_zoom(websocket, message)
             elif action == "export":
                 await _handle_export(websocket, message)
             elif action == "preview_undistort":
                 await _handle_preview_undistort(websocket, message)
+            elif action == "start_preview":
+                if preview_task and not preview_task.done():
+                    preview_stop_event.set()
+                    await preview_task
+                cap = await _ensure_cap(message)
+                preview_stop_event.clear()
+                # Inject cached measurements so preview doesn't re-measure
+                preview_msg = {**message, "_cached_fps": shared_cap_fps,
+                               "_cached_w": shared_cap_w, "_cached_h": shared_cap_h}
+                preview_task = asyncio.create_task(
+                    run_preview(websocket, preview_msg, preview_stop_event, shared_cap=cap)
+                )
+            elif action == "stop_preview":
+                if preview_task and not preview_task.done():
+                    preview_stop_event.set()
             elif action == "start_live_capture":
+                # Stop preview but keep the camera open — pass shared_cap straight to live capture
+                if preview_task and not preview_task.done():
+                    preview_stop_event.set()
+                    await preview_task
                 if capture_task and not capture_task.done():
                     stop_event.set()
                     await capture_task
+                cap = await _ensure_cap(message)
                 stop_event.clear()
                 manual_event.clear()
+                # Inject cached measurements so capture doesn't re-measure
+                cap_msg = {**message, "_cached_fps": shared_cap_fps,
+                           "_cached_w": shared_cap_w, "_cached_h": shared_cap_h}
                 capture_task = asyncio.create_task(
-                    run_live_capture(websocket, message, stop_event, manual_event)
+                    run_live_capture(websocket, cap_msg, stop_event, manual_event, shared_cap=cap)
                 )
             elif action == "stop_live_capture":
                 stop_event.set()
@@ -214,6 +328,13 @@ async def websocket_endpoint(websocket: WebSocket):
     except WebSocketDisconnect:
         if capture_task and not capture_task.done():
             stop_event.set()
+    finally:
+        # Release shared camera on disconnect
+        if shared_cap is not None:
+            try:
+                await loop.run_in_executor(_executor, shared_cap.release)
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('electronAPI', {
-  getBackendPort: () => ipcRenderer.invoke('get-backend-port'),
+  getBackendPort:  () => ipcRenderer.invoke('get-backend-port'),
+  showSaveDialog:  (options) => ipcRenderer.invoke('show-save-dialog', options),
 });

@@ -25,31 +25,50 @@ def score_frame_array(image: np.ndarray, checkerboard_size: tuple) -> dict:
 def _score_image(img: np.ndarray, gray: np.ndarray, w: int, h: int, checkerboard_size: tuple) -> dict:
     sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
-    # --- Primary detector: findChessboardCornersSB (saddle-point, sub-pixel built in) ---
-    found, corners = cv2.findChessboardCornersSB(gray, checkerboard_size, cv2.CALIB_CB_NORMALIZE_IMAGE)
+    # CLAHE-enhanced gray for detection (improves contrast on SDI/capture-card signals)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    gray_eq = clahe.apply(gray)
 
-    # --- Fallback: classic detector with quad filtering ---
+    # --- Attempt 1: SB on CLAHE-enhanced (exhaustive + accuracy) ---
+    sb_flags = (cv2.CALIB_CB_NORMALIZE_IMAGE
+                | cv2.CALIB_CB_EXHAUSTIVE
+                | cv2.CALIB_CB_ACCURACY)
+    found, corners = cv2.findChessboardCornersSB(gray_eq, checkerboard_size, sb_flags)
+
+    # --- Attempt 2: SB on raw gray ---
     if not found:
-        flags = (
-            cv2.CALIB_CB_ADAPTIVE_THRESH
-            | cv2.CALIB_CB_NORMALIZE_IMAGE
-            | cv2.CALIB_CB_FILTER_QUADS
-        )
+        found, corners = cv2.findChessboardCornersSB(
+            gray, checkerboard_size, cv2.CALIB_CB_NORMALIZE_IMAGE)
+
+    # --- Attempt 3: classic detector on CLAHE-enhanced gray ---
+    if not found:
+        flags = (cv2.CALIB_CB_ADAPTIVE_THRESH
+                 | cv2.CALIB_CB_NORMALIZE_IMAGE
+                 | cv2.CALIB_CB_FILTER_QUADS)
+        found, corners = cv2.findChessboardCorners(gray_eq, checkerboard_size, flags)
+        if found:
+            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+            corners = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), criteria)
+
+    # --- Attempt 4: classic detector on raw gray ---
+    if not found:
+        flags = (cv2.CALIB_CB_ADAPTIVE_THRESH
+                 | cv2.CALIB_CB_NORMALIZE_IMAGE
+                 | cv2.CALIB_CB_FILTER_QUADS)
         found, corners = cv2.findChessboardCorners(gray, checkerboard_size, flags)
         if found:
             criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
             corners = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), criteria)
 
     if not found:
-        quality, reason = _rate(sharpness, coverage=0.0, angle=None)
         return {
             "found": False,
             "corners": [],
             "sharpness": round(sharpness, 2),
             "coverage": 0.0,
             "angle": None,
-            "quality": quality,
-            "reason": reason if reason else "Checkerboard not detected",
+            "quality": "fail",
+            "reason": "Checkerboard not detected",
             "image_width": w,
             "image_height": h,
             "pose_metrics": None,
@@ -93,17 +112,18 @@ def _row_angle_deg(pts: np.ndarray) -> float:
 
 
 def _rate(sharpness: float, coverage: float, angle: Optional[float]) -> tuple[str, str]:
+    # Hard fail: genuinely too blurry to use
+    if sharpness < 30:
+        return "fail", f"too blurry (Laplacian {sharpness:.0f})"
+    # Soft warns — pose system handles position/tilt requirements
     reasons = []
-    if sharpness < 100:
-        reasons.append(f"blurry (Laplacian {sharpness:.0f} < 100)")
-    if coverage < 0.40:
-        reasons.append(f"low coverage ({coverage * 100:.1f}% < 40%)")
-    if angle is not None and angle < 10:
-        reasons.append(f"board too flat ({angle:.1f}° < 10°)")
+    if sharpness < 80:
+        reasons.append(f"slightly blurry ({sharpness:.0f})")
+    if coverage < 0.04:
+        reasons.append(f"board very small ({coverage * 100:.1f}%)")
     if not reasons:
         return "good", "All metrics pass"
-    quality = "fail" if len(reasons) >= 2 else "warn"
-    return quality, "; ".join(reasons)
+    return "warn", "; ".join(reasons)
 
 
 def _fail(reason: str, w: int, h: int) -> dict:

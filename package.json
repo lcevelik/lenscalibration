@@ -5,14 +5,14 @@
   "main": "electron/main.js",
   "scripts": {
     "dev:vite": "npm run --prefix frontend dev",
-    "dev:electron": "electron .",
+    "dev:electron": "node electron/launch.js",
     "dev": "concurrently -k -n VITE,ELECTRON -c cyan,yellow \"npm run dev:vite\" \"wait-on http://localhost:5173 && npm run dev:electron\"",
     "build:frontend": "npm run --prefix frontend build",
     "build": "npm run build:frontend && electron-builder"
   },
   "devDependencies": {
     "concurrently": "^8.2.2",
-    "electron": "^30.0.0",
+    "electron": "^41.1.0",
     "electron-builder": "^24.13.3",
     "wait-on": "^7.2.0"
   },

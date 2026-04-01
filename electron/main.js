@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const { spawn } = require('child_process');
 const net = require('net');
 const path = require('path');
@@ -66,6 +66,8 @@ async function createWindow() {
 }
 
 ipcMain.handle('get-backend-port', () => backendPort);
+
+ipcMain.handle('show-save-dialog', (_, options) => dialog.showSaveDialog(options));
 
 app.whenReady().then(createWindow);
 

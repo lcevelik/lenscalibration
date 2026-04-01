@@ -8,6 +8,7 @@ def run_calibration(
     board_rows: int,
     square_size_mm: float,
     image_size: tuple,  # (width, height)
+    squeeze_ratio: float = 1.0,
 ) -> dict:
     """
     Run OpenCV camera calibration from pre-scored frames.
@@ -58,6 +59,9 @@ def run_calibration(
         corners = np.array(frame["corners"], dtype=np.float32).reshape(-1, 1, 2)
         if corners.shape[0] != board_rows * board_cols:
             continue
+        if squeeze_ratio > 1.0:
+            corners = corners.copy()
+            corners[:, :, 0] *= squeeze_ratio  # scale x to de-squeezed space
         obj_points.append(objp)
         img_points.append(corners)
         paths.append(frame.get("path", ""))
@@ -66,14 +70,15 @@ def run_calibration(
         return _error("Not enough frames with the correct corner count after filtering")
 
     # --- Calibration --------------------------------------------------------
+    calib_size = (int(image_size[0] * squeeze_ratio), image_size[1]) if squeeze_ratio > 1.0 else image_size
     rms, camera_matrix, dist_coeffs, rvecs, tvecs = cv2.calibrateCamera(
-        obj_points, img_points, image_size, None, None
+        obj_points, img_points, calib_size, None, None
     )
 
     # --- FOV ----------------------------------------------------------------
     aperture_w, aperture_h = 1.0, 1.0  # sensor size unknown; use 1mm as neutral
     fov_x, fov_y, _, _, aspect = cv2.calibrationMatrixValues(
-        camera_matrix, image_size, aperture_w, aperture_h
+        camera_matrix, calib_size, aperture_w, aperture_h
     )
 
     # --- Per-image reprojection error ---------------------------------------
@@ -103,6 +108,8 @@ def run_calibration(
         "confidence": confidence,
         "used_frames": len(obj_points),
         "skipped_frames": skipped,
+        "squeeze_ratio": squeeze_ratio,
+        "lens_type": "anamorphic" if squeeze_ratio > 1.0 else "spherical",
     }
 
 
