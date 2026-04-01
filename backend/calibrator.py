@@ -72,8 +72,11 @@ def run_calibration(
 
     # --- Calibration --------------------------------------------------------
     calib_size = (int(image_size[0] * squeeze_ratio), image_size[1]) if squeeze_ratio > 1.0 else image_size
+    # CALIB_FIX_SKEW: modern digital sensors have zero pixel skew; estimating it
+    # with limited data overfits and degrades accuracy.
+    calib_flags = cv2.CALIB_FIX_SKEW
     rms, camera_matrix, dist_coeffs, rvecs, tvecs = cv2.calibrateCamera(
-        obj_points, img_points, calib_size, None, None
+        obj_points, img_points, calib_size, None, None, flags=calib_flags
     )
 
     # --- FOV ----------------------------------------------------------------

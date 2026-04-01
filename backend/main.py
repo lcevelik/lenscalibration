@@ -191,6 +191,7 @@ async def _handle_export(websocket: WebSocket, message: dict) -> None:
                                       squeeze_ratio=squeeze_ratio)
     elif fmt == "ue5_ulens_zoom":
         fl_results       = message.get("fl_results", [])
+        fl_interpolated  = message.get("fl_interpolated")          # may be None
         nodal_offsets_mm = message.get("nodal_offsets_mm", {})
         lens_name        = message.get("lens_name", "Lens")
         sensor_width_mm  = float(message.get("sensor_width_mm",  0.0))
@@ -202,6 +203,7 @@ async def _handle_export(websocket: WebSocket, message: dict) -> None:
             sensor_height_mm=sensor_height_mm,
             squeeze_ratio=squeeze_ratio,
             lens_type=lens_type,
+            fl_interpolated=fl_interpolated,
         )
     else:
         lens_name        = message.get("lens_name", "Lens")

@@ -9,8 +9,8 @@ export interface ScoredFrame {
 }
 
 interface PreviewImages {
-  original: string;    // base64 JPEG
-  undistorted: string; // base64 JPEG
+  original: string;    // object URL (revoke when done)
+  undistorted: string; // object URL (revoke when done)
 }
 
 interface Props {
@@ -26,6 +26,14 @@ const QUALITY_DOT: Record<string, string> = {
   fail: 'bg-red-400',
 };
 
+/** Convert a base64-encoded JPEG string to a short-lived object URL. */
+function b64ToObjectUrl(b64: string): string {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return URL.createObjectURL(new Blob([bytes], { type: 'image/jpeg' }));
+}
+
 export default function UndistortPreview({ scoredFrames, cameraMatrix, distCoeffs, ws }: Props) {
   const [selectedIndex, setSelectedIndex] = useState<number>(0);
   const [images, setImages] = useState<PreviewImages | null>(null);
@@ -37,6 +45,25 @@ export default function UndistortPreview({ scoredFrames, cameraMatrix, distCoeff
 
   const previewable = scoredFrames.filter((f) => f.quality !== 'fail');
   const selected = previewable[selectedIndex] ?? null;
+
+  // Revoke object URLs when they are replaced or on unmount to free memory
+  const prevImagesRef = useRef<PreviewImages | null>(null);
+  useEffect(() => {
+    const prev = prevImagesRef.current;
+    if (prev) {
+      URL.revokeObjectURL(prev.original);
+      URL.revokeObjectURL(prev.undistorted);
+    }
+    prevImagesRef.current = images;
+  }, [images]);
+  useEffect(() => {
+    return () => {
+      if (prevImagesRef.current) {
+        URL.revokeObjectURL(prevImagesRef.current.original);
+        URL.revokeObjectURL(prevImagesRef.current.undistorted);
+      }
+    };
+  }, []);
 
   // Listen for preview_result messages
   useEffect(() => {
@@ -50,7 +77,12 @@ export default function UndistortPreview({ scoredFrames, cameraMatrix, distCoeff
           setLoading(false);
           return;
         }
-        setImages({ original: msg.original, undistorted: msg.undistorted });
+        // Convert base64 → object URLs so large JPEG strings are never held in
+        // React state (avoids 5–10 MB allocations on every render).
+        setImages({
+          original:    b64ToObjectUrl(msg.original),
+          undistorted: b64ToObjectUrl(msg.undistorted),
+        });
         setLoading(false);
         setError(null);
       } catch {
