@@ -10,6 +10,31 @@ from pose_advisor import compute_pose_metrics
 _CLAHE = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
 
+def _partial_candidates(full_cols: int, full_rows: int) -> list:
+    """Return candidate sub-grid sizes (cols, rows) for partial board detection.
+
+    Generates all valid reductions in steps of 2 (to keep even checker patterns),
+    sorted by area descending so we try the largest visible sub-grid first.
+    Minimum viable size is (4, 3).
+    """
+    candidates = []
+    for dc in range(0, full_cols - 3, 2):
+        for dr in range(0, full_rows - 2, 2):
+            if dc == 0 and dr == 0:
+                continue  # skip the full size — already tried
+            c, r = full_cols - dc, full_rows - dr
+            if c >= 4 and r >= 3:
+                candidates.append((c, r))
+    candidates.sort(key=lambda x: -(x[0] * x[1]))
+    seen: set = set()
+    unique: list = []
+    for item in candidates:
+        if item not in seen:
+            seen.add(item)
+            unique.append(item)
+    return unique[:16]  # cap attempts to avoid excessive runtime
+
+
 def score_frame(image_path: str, checkerboard_size: tuple) -> dict:
     img = cv2.imread(image_path)
     if img is None:
@@ -63,6 +88,25 @@ def _score_image(img: np.ndarray, gray: np.ndarray, w: int, h: int, checkerboard
             criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
             corners = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), criteria)
 
+    # --- Attempt 5: partial sub-grid (telephoto / chart overflow) ---
+    # When the chart fills more than the frame at long focal lengths, try
+    # progressively smaller inner-corner grids.  The detected sub-grid is
+    # treated as an independent planar target; the partial_grid_size field
+    # lets the calibrators build the correct object-point set per frame.
+    partial_size: Optional[tuple] = None
+    if not found:
+        for sub_size in _partial_candidates(checkerboard_size[0], checkerboard_size[1]):
+            sb_flags = cv2.CALIB_CB_NORMALIZE_IMAGE | cv2.CALIB_CB_EXHAUSTIVE
+            found, corners = cv2.findChessboardCornersSB(gray_eq, sub_size, sb_flags)
+            if found and corners is not None:
+                partial_size = sub_size
+                break
+            found, corners = cv2.findChessboardCornersSB(
+                gray, sub_size, cv2.CALIB_CB_NORMALIZE_IMAGE)
+            if found and corners is not None:
+                partial_size = sub_size
+                break
+
     if not found:
         return {
             "found": False,
@@ -75,8 +119,11 @@ def _score_image(img: np.ndarray, gray: np.ndarray, w: int, h: int, checkerboard
             "image_width": w,
             "image_height": h,
             "pose_metrics": None,
+            "partial_grid_size": None,
         }
 
+    # When using a partial sub-grid, use its actual dimensions for angle/coverage
+    effective_size = partial_size if partial_size else checkerboard_size
     pts = corners.reshape(-1, 2)
 
     x_min, y_min = pts.min(axis=0)
@@ -84,13 +131,15 @@ def _score_image(img: np.ndarray, gray: np.ndarray, w: int, h: int, checkerboard
     bbox_area = (x_max - x_min) * (y_max - y_min)
     coverage = float(bbox_area / (w * h))
 
-    cols = checkerboard_size[0]
+    cols = effective_size[0]
     first_row = pts[:cols]
     angle = _row_angle_deg(first_row)
 
     quality, reason = _rate(sharpness, coverage, angle)
+    if partial_size:
+        reason = f"partial board {partial_size[0]}×{partial_size[1]}; " + reason
 
-    pose_metrics = compute_pose_metrics(pts.tolist(), checkerboard_size, (w, h))
+    pose_metrics = compute_pose_metrics(pts.tolist(), effective_size, (w, h))
 
     return {
         "found": True,
@@ -103,6 +152,7 @@ def _score_image(img: np.ndarray, gray: np.ndarray, w: int, h: int, checkerboard
         "image_width": w,
         "image_height": h,
         "pose_metrics": pose_metrics,
+        "partial_grid_size": list(partial_size) if partial_size else None,
     }
 
 
@@ -141,4 +191,5 @@ def _fail(reason: str, w: int, h: int) -> dict:
         "image_width": w,
         "image_height": h,
         "pose_metrics": None,
+        "partial_grid_size": None,
     }
