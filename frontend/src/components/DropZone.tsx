@@ -13,6 +13,11 @@ function isCalibImage(name: string) {
   return ACCEPTED_EXT.has(ext(name));
 }
 
+// Electron's contextBridge exposes electronAPI; fall back gracefully in browser dev mode.
+const electronAPI = (window as unknown as { electronAPI?: {
+  showOpenDialog: (opts: object) => Promise<{ canceled: boolean; filePaths: string[] }>;
+} }).electronAPI;
+
 interface Props {
   ws: WebSocket | null;
   boardSettings: BoardSettings;
@@ -24,10 +29,7 @@ export default function DropZone({ ws, boardSettings, onBoardChange, onScoringDo
   const [dragging, setDragging] = useState(false);
   const [scoring, setScoring] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const folderInputRef = useRef<HTMLInputElement>(null);
   const pendingFrames = useRef<ScoredFrame[]>([]);
-  const pendingTotal = useRef(0);
 
   useEffect(() => {
     if (!ws) return;
@@ -51,7 +53,6 @@ export default function DropZone({ ws, boardSettings, onBoardChange, onScoringDo
   const startScoring = (paths: string[]) => {
     if (!ws || ws.readyState !== WebSocket.OPEN || paths.length === 0) return;
     pendingFrames.current = [];
-    pendingTotal.current = paths.length;
     setScoring(true);
     setProgress({ done: 0, total: paths.length });
     ws.send(JSON.stringify({
@@ -62,39 +63,75 @@ export default function DropZone({ ws, boardSettings, onBoardChange, onScoringDo
     }));
   };
 
-  const extractPaths = (files: FileList | null): string[] => {
-    if (!files) return [];
-    return Array.from(files)
-      .filter(f => isCalibImage(f.name))
-      .map(f => (f as unknown as { path?: string }).path ?? '')
-      .filter(Boolean);
-  };
-
+  // Drag-and-drop: Electron populates a non-standard `path` property on File objects
+  // even with contextIsolation, because drag source is the OS (not the renderer).
   const onDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setDragging(false);
     if (scoring) return;
-    startScoring(extractPaths(e.dataTransfer.files));
+    const paths = Array.from(e.dataTransfer.files)
+      .filter(f => isCalibImage(f.name))
+      .map(f => (f as unknown as { path?: string }).path ?? '')
+      .filter(Boolean);
+    startScoring(paths);
   };
 
-  const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (scoring) return;
-    startScoring(extractPaths(e.target.files));
-    e.target.value = '';
+  // "Browse files" — uses Electron native open dialog via IPC to get real fs paths.
+  const browseFiles = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (scoring || !electronAPI) return;
+    const result = await electronAPI.showOpenDialog({
+      properties: ['openFile', 'multiSelections'],
+      filters: [
+        { name: 'Calibration Images', extensions: ['jpg', 'jpeg', 'png', 'tif', 'tiff', 'dng'] },
+        { name: 'All Files', extensions: ['*'] },
+      ],
+    });
+    if (!result.canceled && result.filePaths.length > 0) {
+      startScoring(result.filePaths.filter(p => isCalibImage(p)));
+    }
+  };
+
+  // "Browse folder" — opens a folder picker and passes all matching image paths.
+  const browseFolder = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (scoring || !electronAPI) return;
+    const result = await electronAPI.showOpenDialog({
+      properties: ['openDirectory'],
+    });
+    if (!result.canceled && result.filePaths.length > 0) {
+      // Ask the backend to enumerate the folder — send the folder path as a
+      // single-element list; the backend score_frames handler reads each path.
+      // Instead, resolve client-side by sending the folder path with a trailing
+      // slash so main.py can glob it. Actually we need individual file paths, so
+      // we pass the folder path to a separate action.
+      // Simplest approach: send folder path to backend via score_frames with
+      // a flag, but that requires backend changes. Instead: use the native dialog
+      // again with 'openFile' + 'multiSelections' defaulting to that folder.
+      const folderPath = result.filePaths[0];
+      const second = await electronAPI.showOpenDialog({
+        properties: ['openFile', 'multiSelections'],
+        defaultPath: folderPath,
+        filters: [
+          { name: 'Calibration Images', extensions: ['jpg', 'jpeg', 'png', 'tif', 'tiff', 'dng'] },
+        ],
+      });
+      if (!second.canceled && second.filePaths.length > 0) {
+        startScoring(second.filePaths.filter(p => isCalibImage(p)));
+      }
+    }
   };
 
   const spinnerPct = progress.total > 0 ? (progress.done / progress.total) * 100 : 0;
 
   return (
     <div className="space-y-3">
-      {/* Board preset */}
       <BoardPresetSelector
         boardSettings={boardSettings}
         onBoardChange={onBoardChange}
         disabled={scoring}
       />
 
-      {/* Drop target */}
       <div
         onDragOver={e => { e.preventDefault(); setDragging(true); }}
         onDragLeave={() => setDragging(false)}
@@ -108,7 +145,7 @@ export default function DropZone({ ws, boardSettings, onBoardChange, onScoringDo
             ? 'border-slate-600 bg-slate-700/30'
             : 'border-slate-600 bg-slate-800 hover:border-slate-500 hover:bg-slate-700/40'}
         `}
-        onClick={() => !scoring && fileInputRef.current?.click()}
+        onClick={browseFiles}
       >
         {scoring ? (
           <>
@@ -132,13 +169,13 @@ export default function DropZone({ ws, boardSettings, onBoardChange, onScoringDo
             </div>
             <div className="flex gap-2">
               <button
-                onClick={e => { e.stopPropagation(); fileInputRef.current?.click(); }}
+                onClick={browseFiles}
                 className="text-xs px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-lg border border-slate-600 transition-colors"
               >
                 Browse files
               </button>
               <button
-                onClick={e => { e.stopPropagation(); folderInputRef.current?.click(); }}
+                onClick={browseFolder}
                 className="text-xs px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-lg border border-slate-600 transition-colors"
               >
                 Browse folder
@@ -147,24 +184,6 @@ export default function DropZone({ ws, boardSettings, onBoardChange, onScoringDo
           </>
         )}
       </div>
-
-      <input
-        ref={fileInputRef}
-        type="file"
-        multiple
-        accept=".jpg,.jpeg,.png,.tif,.tiff,.dng"
-        className="hidden"
-        onChange={onFileChange}
-      />
-      <input
-        ref={folderInputRef}
-        type="file"
-        // @ts-ignore — webkitdirectory is non-standard
-        webkitdirectory=""
-        multiple
-        className="hidden"
-        onChange={onFileChange}
-      />
     </div>
   );
 }

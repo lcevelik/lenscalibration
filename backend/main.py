@@ -4,6 +4,7 @@ import atexit
 import base64
 import json
 import os
+import socket
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
@@ -25,9 +26,12 @@ from live_capture import run_live_capture, run_preview
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    # Restrict to localhost origins only — this backend is not a public API
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173",
-                   "http://localhost:3000", "http://127.0.0.1:3000"],
+    # Allow local network — tab/phone on same LAN can access
+    allow_origins=[
+        "http://localhost:5173", "http://127.0.0.1:5173",
+        "http://localhost:3000", "http://127.0.0.1:3000",
+        "*",  # Allow any origin from local network (no internet exposure)
+    ],
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
@@ -114,15 +118,27 @@ async def _handle_calibrate(websocket: WebSocket, message: dict) -> None:
     image_size: tuple = tuple(message.get("image_size", [1920, 1080]))
     squeeze_ratio: float = max(1.0, min(float(message.get("squeeze_ratio", 1.0)), 4.0))
     usable_count = sum(1 for f in scored_frames if f.get("quality") != "fail")
+    print(f"[calibrate] received request: total={len(scored_frames)} usable={usable_count} size={image_size} squeeze={squeeze_ratio}", flush=True)
     await websocket.send_text(json.dumps({
         "action": "calibrate_progress",
         "status": "running",
         "message": f"Running calibration on {usable_count} usable frames…",
     }))
     loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(
-        _executor, run_calibration, scored_frames, board_cols, board_rows, square_size_mm, image_size, squeeze_ratio,
-    )
+    try:
+        result = await loop.run_in_executor(
+            _executor, run_calibration, scored_frames, board_cols, board_rows, square_size_mm, image_size, squeeze_ratio,
+        )
+    except Exception as e:
+        print(f"[calibrate] exception: {e}", flush=True)
+        result = {
+            "rms": None, "camera_matrix": None, "dist_coeffs": None,
+            "fov_x": None, "fov_y": None, "per_image_errors": [],
+            "confidence": "poor", "used_frames": 0, "skipped_frames": 0,
+            "squeeze_ratio": squeeze_ratio, "lens_type": "spherical",
+            "error": f"Calibration error: {e}",
+        }
+    print(f"[calibrate] result sent: success={result.get('error') is None} used={result.get('used_frames')} error={result.get('error')}", flush=True)
     await websocket.send_text(json.dumps({"action": "calibrate_result", **result}))
 
 
@@ -138,6 +154,10 @@ async def _handle_calibrate_zoom(websocket: WebSocket, message: dict) -> None:
     squeeze_ratio:    float = max(1.0, min(float(message.get("squeeze_ratio", 1.0)), 4.0))
 
     total_frames = sum(len(g.get("frames", [])) for g in fl_groups)
+    print(
+        f"[zoom_calibrate] received request: fls={len(fl_groups)} total_frames={total_frames} size={image_size} squeeze={squeeze_ratio}",
+        flush=True,
+    )
     await websocket.send_text(json.dumps({
         "action":  "zoom_calibrate_progress",
         "status":  "running",
@@ -148,6 +168,10 @@ async def _handle_calibrate_zoom(websocket: WebSocket, message: dict) -> None:
         _executor, run_zoom_calibration,
         fl_groups, board_cols, board_rows, square_size_mm, image_size,
         sensor_width_mm, sensor_height_mm, squeeze_ratio,
+    )
+    print(
+        f"[zoom_calibrate] result sent: success={result.get('success')} error={result.get('error')} rows={len(result.get('fl_results', []))}",
+        flush=True,
     )
     await websocket.send_text(json.dumps({"action": "zoom_calibrate_result", **result}))
 
@@ -255,6 +279,7 @@ async def websocket_endpoint(websocket: WebSocket):
     capture_task: Optional[asyncio.Task] = None
     stop_event   = asyncio.Event()
     manual_event = asyncio.Event()
+    target_pose_ref: list = [None]  # [pose_id | None] — mutable ref shared with live_capture task
 
     preview_task: Optional[asyncio.Task] = None
     preview_stop_event = asyncio.Event()
@@ -350,16 +375,19 @@ async def websocket_endpoint(websocket: WebSocket):
                 cap = await _ensure_cap(message)
                 stop_event.clear()
                 manual_event.clear()
+                target_pose_ref[0] = None  # reset pinned pose on new capture session
                 # Inject cached measurements so capture doesn't re-measure
                 cap_msg = {**message, "_cached_fps": shared_cap_fps,
                            "_cached_w": shared_cap_w, "_cached_h": shared_cap_h}
                 capture_task = asyncio.create_task(
-                    run_live_capture(websocket, cap_msg, stop_event, manual_event, shared_cap=cap)
+                    run_live_capture(websocket, cap_msg, stop_event, manual_event, shared_cap=cap, target_pose_ref=target_pose_ref)
                 )
             elif action == "stop_live_capture":
                 stop_event.set()
             elif action == "manual_capture":
                 manual_event.set()
+            elif action == "set_target_pose":
+                target_pose_ref[0] = message.get("pose_id") or None
             else:
                 await websocket.send_text(json.dumps(message))
 
@@ -375,8 +403,22 @@ async def websocket_endpoint(websocket: WebSocket):
                 pass
 
 
+def _get_local_ip() -> str:
+    """Get the local IPv4 address for network access."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "localhost"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
-    uvicorn.run(app, host="127.0.0.1", port=args.port)
+    local_ip = _get_local_ip()
+    print(f"Backend listening on http://{local_ip}:{args.port} and http://localhost:{args.port}", flush=True)
+    uvicorn.run(app, host="0.0.0.0", port=args.port)

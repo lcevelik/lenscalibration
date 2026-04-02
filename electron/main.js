@@ -1,10 +1,12 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const { spawn } = require('child_process');
 const net = require('net');
+const os = require('os');
 const path = require('path');
 
 let backendPort = null;
 let backendProcess = null;
+let localIp = null;
 
 function getAvailablePort() {
   return new Promise((resolve, reject) => {
@@ -103,15 +105,58 @@ async function createWindow() {
     },
   });
 
+  localIp = getLocalIP();
+  const devUrl = `http://${localIp}:5173`;
+  console.log(`\n📱 Remote access: http://${localIp}:5173\n`);
+
   if (app.isPackaged) {
     win.loadFile(path.join(__dirname, '..', 'frontend', 'dist', 'index.html'));
   } else {
-    win.loadURL('http://localhost:5173');
+    win.loadURL(devUrl);
     win.webContents.openDevTools();
   }
 }
 
+function getLocalIP() {
+  try {
+    const interfaces = os.networkInterfaces();
+    for (const name of Object.keys(interfaces)) {
+      for (const iface of interfaces[name]) {
+        if (iface.family === 'IPv4' && !iface.internal) {
+          return iface.address;
+        }
+      }
+    }
+  } catch (err) {
+    console.error('Error getting local IP:', err);
+  }
+  return 'localhost';
+}
+
 ipcMain.handle('get-backend-port', () => backendPort);
+
+ipcMain.handle('get-local-ip', () => {
+  if (!localIp) {
+    localIp = getLocalIP();
+  }
+  return localIp;
+});
+
+ipcMain.handle('show-open-dialog', async (_, options) => {
+  const allowedProps = new Set(['openFile', 'openDirectory', 'multiSelections', 'showHiddenFiles']);
+  const safeOptions = { properties: ['openFile', 'multiSelections'] };
+  if (options && Array.isArray(options.properties)) {
+    safeOptions.properties = options.properties.filter(p => allowedProps.has(p));
+  }
+  if (options && Array.isArray(options.filters)) safeOptions.filters = options.filters;
+  if (options && typeof options.defaultPath === 'string') safeOptions.defaultPath = options.defaultPath;
+  try {
+    return await dialog.showOpenDialog(safeOptions);
+  } catch (err) {
+    console.error('showOpenDialog error:', err);
+    return { canceled: true, filePaths: [] };
+  }
+});
 
 ipcMain.handle('show-save-dialog', async (_, options) => {
   // Whitelist allowed option keys to prevent unexpected Electron API behaviour

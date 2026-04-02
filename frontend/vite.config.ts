@@ -6,6 +6,7 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   base: './',
   server: {
+    host: '0.0.0.0',  // Listen on all network interfaces for remote access
     port: 5173,
     strictPort: true,
   },

@@ -1,5 +1,114 @@
 import numpy as np
 import cv2
+from collections import Counter
+
+
+def _run_calibration_pass(
+    obj_points: list,
+    img_points: list,
+    calib_size: tuple,
+    sparse_mode: bool = False,
+):
+    calib_flags = getattr(cv2, "CALIB_FIX_SKEW", 0)
+    if not sparse_mode:
+        return cv2.calibrateCamera(obj_points, img_points, calib_size, None, None, flags=calib_flags)
+
+    # Sparse correspondences (e.g. marker centers) are under-constrained for
+    # high-order distortion terms. Use a conservative model to prevent overfit.
+    w, h = calib_size
+    cam0 = np.array(
+        [[max(w, h), 0.0, w / 2.0],
+         [0.0, max(w, h), h / 2.0],
+         [0.0, 0.0, 1.0]],
+        dtype=np.float64,
+    )
+    dc0 = np.zeros((5, 1), dtype=np.float64)
+    calib_flags |= (
+        cv2.CALIB_USE_INTRINSIC_GUESS
+        | cv2.CALIB_FIX_K3
+        | cv2.CALIB_ZERO_TANGENT_DIST
+    )
+    return cv2.calibrateCamera(obj_points, img_points, calib_size, cam0, dc0, flags=calib_flags)
+
+
+def _run_constrained_fallback_pass(obj_points: list, img_points: list, calib_size: tuple):
+    """Fallback solve with stronger regularization for tele / low-parallax sets."""
+    w, h = calib_size
+    cam0 = np.array(
+        [[max(w, h), 0.0, w / 2.0],
+         [0.0, max(w, h), h / 2.0],
+         [0.0, 0.0, 1.0]],
+        dtype=np.float64,
+    )
+    dc0 = np.zeros((5, 1), dtype=np.float64)
+    flags = getattr(cv2, "CALIB_FIX_SKEW", 0)
+    flags |= (
+        cv2.CALIB_USE_INTRINSIC_GUESS
+        | cv2.CALIB_FIX_K2
+        | cv2.CALIB_FIX_K3
+        | cv2.CALIB_ZERO_TANGENT_DIST
+        | cv2.CALIB_FIX_ASPECT_RATIO
+    )
+    return cv2.calibrateCamera(obj_points, img_points, calib_size, cam0, dc0, flags=flags)
+
+
+def _is_implausible_solution(camera_matrix: np.ndarray, dist_coeffs: np.ndarray, calib_size: tuple) -> bool:
+    w, h = calib_size
+    fx = float(camera_matrix[0, 0])
+    fy = float(camera_matrix[1, 1])
+    cx = float(camera_matrix[0, 2])
+    cy = float(camera_matrix[1, 2])
+    dc = dist_coeffs.flatten()
+    k1 = float(dc[0]) if len(dc) > 0 else 0.0
+    k2 = float(dc[1]) if len(dc) > 1 else 0.0
+    p1 = float(dc[2]) if len(dc) > 2 else 0.0
+    p2 = float(dc[3]) if len(dc) > 3 else 0.0
+
+    if not np.isfinite([fx, fy, cx, cy, k1, k2, p1, p2]).all():
+        return True
+    if fx < 0.2 * w or fy < 0.2 * h:
+        return True
+    if fx > 20.0 * w or fy > 20.0 * h:
+        return True
+    if abs(cx) > 3.0 * w or abs(cy) > 3.0 * h:
+        return True
+    if abs(k1) > 2.0 or abs(k2) > 2.0:
+        return True
+    if abs(p1) > 0.2 or abs(p2) > 0.2:
+        return True
+    return False
+
+
+def _compute_per_image_errors(
+    obj_points: list,
+    img_points: list,
+    paths: list,
+    camera_matrix: np.ndarray,
+    dist_coeffs: np.ndarray,
+    rvecs: list,
+    tvecs: list,
+) -> list[dict]:
+    per_image_errors = []
+    for i, (obj, img, rvec, tvec) in enumerate(zip(obj_points, img_points, rvecs, tvecs)):
+        projected, _ = cv2.projectPoints(obj, rvec, tvec, camera_matrix, dist_coeffs)
+        diff = img.reshape(-1, 2) - projected.reshape(-1, 2)
+        sq_err = np.sum(diff ** 2, axis=1)
+        if np.any(~np.isfinite(sq_err)):
+            err = float("inf")
+        else:
+            err = float(np.sqrt(np.mean(sq_err)))
+        per_image_errors.append({"path": paths[i], "error": round(err, 4), "outlier": False})
+    return per_image_errors
+
+
+def _mark_outliers(per_image_errors: list[dict]) -> tuple[list[dict], float]:
+    errors_arr = np.array([e["error"] for e in per_image_errors])
+    q1, q3 = float(np.percentile(errors_arr, 25)), float(np.percentile(errors_arr, 75))
+    iqr = q3 - q1
+    outlier_threshold = q3 + 1.5 * iqr if iqr > 0 else float(np.median(errors_arr)) * 2.0
+    for entry in per_image_errors:
+        entry["outlier"] = entry["error"] > outlier_threshold
+    return per_image_errors, outlier_threshold
 
 
 def run_calibration(
@@ -46,6 +155,18 @@ def run_calibration(
             squeeze_ratio,
         )
 
+    # Use one detection model per solve. Mixing checkerboard and aruco-grid
+    # frames in one calibration causes inconsistent board coordinates.
+    det_counter = Counter((f.get("detection_type") or "checkerboard") for f in usable)
+    selected_det = None
+    for det_name in ("checkerboard", "aruco_grid", "charuco"):
+        if det_counter.get(det_name, 0) >= 3:
+            selected_det = det_name
+            break
+    if selected_det is None:
+        selected_det = det_counter.most_common(1)[0][0]
+    usable = [f for f in usable if (f.get("detection_type") or "checkerboard") == selected_det]
+
     # --- Object points (3-D grid, z = 0) ------------------------------------
     objp = np.zeros((board_rows * board_cols, 3), dtype=np.float32)
     objp[:, :2] = (
@@ -56,14 +177,27 @@ def run_calibration(
     img_points = []
     paths = []
 
+    sparse_mode = False
     for frame in usable:
         corners = np.array(frame["corners"], dtype=np.float32).reshape(-1, 1, 2)
-        if corners.shape[0] != board_rows * board_cols:
-            continue
+        frame_obj_points = frame.get("obj_points")
+        if frame_obj_points:
+            obj = np.array(frame_obj_points, dtype=np.float32).reshape(-1, 3)
+            if obj.shape[0] != corners.shape[0] or obj.shape[0] < 6:
+                continue
+            if (frame.get("detection_type") or "") == "aruco_grid":
+                # frame_scorer uses board units where one square = 1.0;
+                # convert to mm so translation/nodal scale is meaningful.
+                obj = obj * float(square_size_mm)
+            sparse_mode = True
+        else:
+            if corners.shape[0] != board_rows * board_cols:
+                continue
+            obj = objp
         if squeeze_ratio > 1.0:
             corners = corners.copy()
             corners[:, :, 0] *= squeeze_ratio  # scale x to de-squeezed space
-        obj_points.append(objp)
+        obj_points.append(obj)
         img_points.append(corners)
         paths.append(frame.get("path", ""))
 
@@ -72,12 +206,43 @@ def run_calibration(
 
     # --- Calibration --------------------------------------------------------
     calib_size = (int(image_size[0] * squeeze_ratio), image_size[1]) if squeeze_ratio > 1.0 else image_size
-    # CALIB_FIX_SKEW: modern digital sensors have zero pixel skew; estimating it
-    # with limited data overfits and degrades accuracy.
-    calib_flags = cv2.CALIB_FIX_SKEW
-    rms, camera_matrix, dist_coeffs, rvecs, tvecs = cv2.calibrateCamera(
-        obj_points, img_points, calib_size, None, None, flags=calib_flags
-    )
+    solver_warning = None
+    try:
+        rms, camera_matrix, dist_coeffs, rvecs, tvecs = _run_calibration_pass(
+            obj_points, img_points, calib_size, sparse_mode=sparse_mode
+        )
+    except cv2.error as e:
+        return _error(f"OpenCV calibration failed: {e}", squeeze_ratio)
+
+    if _is_implausible_solution(camera_matrix, dist_coeffs, calib_size):
+        try:
+            rms_fb, cm_fb, dc_fb, rv_fb, tv_fb = _run_constrained_fallback_pass(
+                obj_points, img_points, calib_size
+            )
+            if not _is_implausible_solution(cm_fb, dc_fb, calib_size):
+                rms, camera_matrix, dist_coeffs, rvecs, tvecs = rms_fb, cm_fb, dc_fb, rv_fb, tv_fb
+                solver_warning = (
+                    "Used constrained tele fallback solver (k2/k3 fixed, tangential fixed). "
+                    "Add wider-FOV / stronger-tilt frames for highest accuracy."
+                )
+            else:
+                return _error(
+                    "Calibration solution is unstable/implausible for this frame set. "
+                    "Capture more varied poses (different positions/tilts) or include wider-FOV frames.",
+                    squeeze_ratio,
+                )
+        except cv2.error:
+            return _error(
+                "Calibration solution is unstable/implausible for this frame set. "
+                "Capture more varied poses (different positions/tilts) or include wider-FOV frames.",
+                squeeze_ratio,
+            )
+
+    if not np.isfinite(rms) or rms > 5.0:
+        return _error(
+            f"Calibration RMS too high ({rms:.2f}px). Data is inconsistent for this board/profile.",
+            squeeze_ratio,
+        )
 
     # --- FOV ----------------------------------------------------------------
     aperture_w, aperture_h = 1.0, 1.0  # sensor size unknown; use 1mm as neutral
@@ -86,26 +251,37 @@ def run_calibration(
     )
 
     # --- Per-image reprojection error ---------------------------------------
-    per_image_errors = []
-    for i, (obj, img, rvec, tvec) in enumerate(zip(obj_points, img_points, rvecs, tvecs)):
-        projected, _ = cv2.projectPoints(obj, rvec, tvec, camera_matrix, dist_coeffs)
-        diff = img.reshape(-1, 2) - projected.reshape(-1, 2)
-        sq_err = np.sum(diff ** 2, axis=1)
-        # Guard against NaN/Inf from degenerate pose estimates
-        if np.any(~np.isfinite(sq_err)):
-            err = float("inf")
-        else:
-            err = float(np.sqrt(np.mean(sq_err)))
-        per_image_errors.append({"path": paths[i], "error": round(err, 4), "outlier": False})
+    per_image_errors = _compute_per_image_errors(
+        obj_points, img_points, paths, camera_matrix, dist_coeffs, rvecs, tvecs
+    )
+    per_image_errors, _ = _mark_outliers(per_image_errors)
 
-    # Use Tukey IQR method — robust against skewed distributions caused by one
-    # very bad frame dragging the mean up and masking all other outliers.
-    errors_arr = np.array([e["error"] for e in per_image_errors])
-    q1, q3 = float(np.percentile(errors_arr, 25)), float(np.percentile(errors_arr, 75))
-    iqr = q3 - q1
-    outlier_threshold = q3 + 1.5 * iqr if iqr > 0 else float(np.median(errors_arr)) * 2.0
-    for entry in per_image_errors:
-        entry["outlier"] = entry["error"] > outlier_threshold
+    # If a few frames are clear outliers, rerun calibration using inliers only.
+    # This improves stability without requiring the operator to manually prune frames.
+    inlier_indices = [i for i, entry in enumerate(per_image_errors) if not entry["outlier"]]
+    if 3 <= len(inlier_indices) < len(obj_points):
+        inlier_obj_points = [obj_points[i] for i in inlier_indices]
+        inlier_img_points = [img_points[i] for i in inlier_indices]
+        inlier_paths = [paths[i] for i in inlier_indices]
+        try:
+            refined_rms, refined_camera_matrix, refined_dist_coeffs, refined_rvecs, refined_tvecs = _run_calibration_pass(
+                inlier_obj_points, inlier_img_points, calib_size, sparse_mode=sparse_mode
+            )
+            if np.isfinite(refined_rms) and refined_rms <= rms:
+                rms = refined_rms
+                camera_matrix = refined_camera_matrix
+                dist_coeffs = refined_dist_coeffs
+                paths = inlier_paths
+                obj_points = inlier_obj_points
+                img_points = inlier_img_points
+                rvecs = refined_rvecs
+                tvecs = refined_tvecs
+                per_image_errors = _compute_per_image_errors(
+                    obj_points, img_points, paths, camera_matrix, dist_coeffs, rvecs, tvecs
+                )
+                per_image_errors, _ = _mark_outliers(per_image_errors)
+        except cv2.error:
+            pass
 
     # --- Confidence ---------------------------------------------------------
     confidence = _confidence(rms)
@@ -120,8 +296,10 @@ def run_calibration(
         "confidence": confidence,
         "used_frames": len(obj_points),
         "skipped_frames": skipped,
+        "detection_type": selected_det,
         "squeeze_ratio": squeeze_ratio,
         "lens_type": "anamorphic" if squeeze_ratio > 1.0 else "spherical",
+        "warning": solver_warning,
     }
 
 

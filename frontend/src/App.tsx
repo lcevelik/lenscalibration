@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { BoardSettings, CameraSettings, CalibrationResult, ConnStatus, LensSettings, ScoredFrame } from './types';
+import type { ZoomCalibResult, ZoomFlResult } from './components/GuidedCapture';
 import CoverageMap from './components/CoverageMap';
 import DropZone from './components/DropZone';
 import FrameGrid from './components/FrameGrid';
@@ -41,9 +42,222 @@ const STATUS_DOT: Record<ConnStatus, string> = {
   error:        'bg-red-400',
 };
 
+const ZOOM_CONFIDENCE_COLOR: Record<string, string> = {
+  excellent: 'text-emerald-400',
+  good:      'text-blue-400',
+  marginal:  'text-yellow-400',
+  poor:      'text-red-400',
+};
+
+// ---------------------------------------------------------------------------
+// Zoom Results Panel (used in the Results tab after multi-FL calibration)
+// ---------------------------------------------------------------------------
+
+/** Convert a ZoomFlResult to a CalibrationResult so ResultPanel can render it. */
+function flResultToCalibResult(r: ZoomFlResult, imageSize: [number, number]): CalibrationResult {
+  const fx = r.fx_px || 1, fy = r.fy_px || 1;
+  const fov_x = 2 * Math.atan(imageSize[0] / (2 * fx)) * (180 / Math.PI);
+  const fov_y = 2 * Math.atan(imageSize[1] / (2 * fy)) * (180 / Math.PI);
+  return {
+    rms: r.rms ?? 0,
+    camera_matrix: r.camera_matrix,
+    dist_coeffs: r.dist_coeffs,
+    fov_x,
+    fov_y,
+    confidence: (r.confidence ?? 'poor') as CalibrationResult['confidence'],
+    per_image_errors: r.per_image_errors ?? [],
+    used_frames: r.used_frames ?? 0,
+    skipped_frames: 0,
+  };
+}
+
+interface ZoomResultsPanelProps {
+  result: ZoomCalibResult;
+  imageSize: [number, number];
+  ws: WebSocket | null;
+  lensSettings: LensSettings;
+  cameraSettings: CameraSettings;
+  exportStatus: 'idle' | 'loading' | 'success' | 'error';
+  exportPath: string | null;
+  onExportStatusChange: (s: 'idle' | 'loading' | 'success' | 'error') => void;
+  selectedFlMm: number | null;
+  onSelectFl: (fl: number | null) => void;
+}
+
+function ZoomResultsPanel({ result, imageSize, ws, lensSettings, cameraSettings, exportStatus, exportPath, onExportStatusChange, selectedFlMm, onSelectFl }: ZoomResultsPanelProps) {
+  const [showNodalTable, setShowNodalTable] = useState(false);
+
+  const doExport = async () => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    let outputPath = 'calibration_zoom.ulens';
+    if (window.electronAPI?.showSaveDialog) {
+      const dlg = await window.electronAPI.showSaveDialog({
+        defaultPath: outputPath,
+        filters: [{ name: 'UE5 Lens File', extensions: ['ulens'] }, { name: 'All Files', extensions: ['*'] }],
+      });
+      if (dlg.canceled || !dlg.filePath) return;
+      outputPath = dlg.filePath;
+    }
+    onExportStatusChange('loading');
+    ws.send(JSON.stringify({
+      action: 'export', format: 'ue5_ulens_zoom', output_path: outputPath,
+      fl_results: result.fl_results, nodal_offsets_mm: result.nodal_offsets_mm,
+      image_size: imageSize, lens_name: cameraSettings.lensName.trim() || 'Lens',
+      sensor_width_mm: parseFloat(cameraSettings.sensorWidthMm) || 0,
+      sensor_height_mm: parseFloat(cameraSettings.sensorHeightMm) || 0,
+      lens_type: lensSettings.lensType,
+      squeeze_ratio: lensSettings.squeezeRatio,
+    }));
+  };
+
+  const fls = result.fl_results.length;
+  const avgRms = result.fl_results.filter(r => r.rms != null).reduce((s, r) => s + (r.rms ?? 0), 0) /
+                 Math.max(1, result.fl_results.filter(r => r.rms != null).length);
+
+  const selectedFlResult = selectedFlMm != null
+    ? result.fl_results.find(r => r.focal_length_mm === selectedFlMm) ?? null
+    : null;
+
+  const interpRows = result.fl_interpolated ?? [];
+
+  return (
+    <div className="space-y-5">
+      {result.error && (
+        <div className="rounded-xl bg-red-500/10 border border-red-500/30 p-4 text-sm text-red-400">{result.error}</div>
+      )}
+
+      {/* Summary badge row */}
+      <div className="flex items-center gap-3 flex-wrap">
+        <span className="rounded-full bg-blue-500/15 border border-blue-500/30 text-blue-400 text-xs font-semibold px-3 py-1">
+          {fls} focal length{fls !== 1 ? 's' : ''}
+        </span>
+        <span className="rounded-full bg-slate-700 border border-slate-600 text-slate-300 text-xs font-semibold px-3 py-1">
+          Avg RMS {avgRms.toFixed(3)} px
+        </span>
+        <span className="rounded-full bg-slate-700 border border-slate-600 text-slate-300 text-xs font-semibold px-3 py-1">
+          {imageSize[0]}×{imageSize[1]}
+        </span>
+      </div>
+
+      {/* Two-column layout when a FL is selected */}
+      <div className={selectedFlResult ? 'grid grid-cols-2 gap-5 items-start' : ''}>
+
+        {/* Left: Per-FL summary table */}
+        <div className="rounded-xl bg-slate-800 border border-slate-700 p-5 space-y-4">
+          <h2 className="text-sm font-semibold text-slate-300 tracking-wide uppercase">Per Focal Length — click to inspect</h2>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-slate-500 uppercase tracking-wider border-b border-slate-700">
+                  <th className="text-left pb-2 pr-4">FL (mm)</th>
+                  <th className="text-right pb-2 pr-4">RMS</th>
+                  <th className="text-right pb-2 pr-4">f (px)</th>
+                  <th className="text-right pb-2 pr-4">k1</th>
+                  <th className="text-right pb-2 pr-4">Nodal Δ</th>
+                  <th className="text-right pb-2">Quality</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-700/50">
+                {result.fl_results.map(r => {
+                  const nzKey = Number.isInteger(r.focal_length_mm) ? String(r.focal_length_mm) : r.focal_length_mm.toFixed(1);
+                  const nz = result.nodal_offsets_mm[nzKey] ?? result.nodal_offsets_mm[String(r.focal_length_mm)];
+                  const isSelected = selectedFlMm === r.focal_length_mm;
+                  return (
+                    <tr key={r.focal_length_mm}
+                      onClick={() => !r.error && onSelectFl(isSelected ? null : r.focal_length_mm)}
+                      className={`cursor-pointer transition-colors ${r.error ? 'opacity-50' : isSelected ? 'bg-blue-500/15' : 'hover:bg-slate-700/60'}`}>
+                      <td className={`py-2 pr-4 font-semibold ${isSelected ? 'text-blue-300' : 'text-slate-200'}`}>{r.focal_length_mm}</td>
+                      <td className={`py-2 pr-4 text-right font-mono tabular-nums ${r.rms == null ? 'text-red-400' : r.rms < 0.5 ? 'text-emerald-400' : r.rms < 1.0 ? 'text-yellow-400' : 'text-red-400'}`}>
+                        {r.rms != null ? r.rms.toFixed(3) : '—'}
+                      </td>
+                      <td className="py-2 pr-4 text-right font-mono tabular-nums text-slate-300">{r.fx_px ? r.fx_px.toFixed(0) : '—'}</td>
+                      <td className="py-2 pr-4 text-right font-mono tabular-nums text-slate-300">{r.dist_coeffs?.[0] != null ? r.dist_coeffs[0].toFixed(4) : '—'}</td>
+                      <td className="py-2 pr-4 text-right font-mono tabular-nums text-slate-400">{nz != null ? `${nz >= 0 ? '+' : ''}${nz.toFixed(1)} mm` : '—'}</td>
+                      <td className={`py-2 text-right capitalize ${ZOOM_CONFIDENCE_COLOR[r.confidence] ?? 'text-slate-500'}`}>
+                        {r.error ? 'error' : (r.confidence ?? '—')}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <p className="text-[11px] text-slate-500 leading-relaxed">
+            Nodal Δ = Z-axis shift vs reference FL. Click a row to see full distortion details.
+          </p>
+
+          {/* Interpolated nodal offset table toggle */}
+          {interpRows.length > 0 && (
+            <div className="pt-2 border-t border-slate-700">
+              <button type="button" onClick={() => setShowNodalTable(v => !v)}
+                className="text-xs text-blue-400 hover:text-blue-300 font-semibold transition-colors">
+                {showNodalTable ? '▾ Hide' : '▸ Show'} interpolated nodal offsets ({interpRows.length} FLs)
+              </button>
+              {showNodalTable && (
+                <div className="mt-3 overflow-x-auto max-h-64 overflow-y-auto">
+                  <table className="w-full text-xs">
+                    <thead className="sticky top-0 bg-slate-800">
+                      <tr className="text-slate-500 uppercase tracking-wider border-b border-slate-700">
+                        <th className="text-left pb-1.5 pr-4">FL (mm)</th>
+                        <th className="text-right pb-1.5 pr-4">f (px)</th>
+                        <th className="text-right pb-1.5 pr-4">k1</th>
+                        <th className="text-right pb-1.5">Nodal Δ (mm)</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-700/30">
+                      {interpRows.map(r => (
+                        <tr key={r.focal_length_mm} className="text-slate-400">
+                          <td className="py-1 pr-4 font-mono">{r.focal_length_mm.toFixed(1)}</td>
+                          <td className="py-1 pr-4 text-right font-mono">{r.fx_px.toFixed(0)}</td>
+                          <td className="py-1 pr-4 text-right font-mono">{r.dist_coeffs?.[0]?.toFixed(4) ?? '—'}</td>
+                          <td className={`py-1 text-right font-mono tabular-nums ${r.nodal_offset_z_mm >= 0 ? 'text-slate-300' : 'text-slate-300'}`}>
+                            {r.nodal_offset_z_mm >= 0 ? '+' : ''}{r.nodal_offset_z_mm.toFixed(2)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Export */}
+          <div className="pt-3 border-t border-slate-700 space-y-2">
+            <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Export UE5 .ulens (Zoom)</h3>
+            {(!cameraSettings.sensorWidthMm || !cameraSettings.lensName) && (
+              <p className="text-[11px] text-yellow-500/80">Set sensor dimensions and lens name in Settings for accurate export.</p>
+            )}
+            <button type="button" onClick={doExport} disabled={exportStatus === 'loading' || !ws}
+              className={`px-5 py-2 rounded-lg text-sm font-semibold transition-colors ${
+                exportStatus === 'success' ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-400' :
+                exportStatus === 'error'   ? 'bg-red-500/10 border border-red-500/30 text-red-400' :
+                exportStatus === 'loading' ? 'bg-slate-700 text-slate-400 cursor-wait border border-slate-600' :
+                                             'bg-blue-600 hover:bg-blue-500 text-white'
+              }`}>
+              {exportStatus === 'loading' ? 'Exporting…' : exportStatus === 'success' ? 'Exported ✓' : exportStatus === 'error' ? 'Export failed' : 'Export UE5 .ulens (multi-FL)'}
+            </button>
+            {exportPath && <p className="text-[10px] text-slate-500 font-mono truncate" title={exportPath}>{exportPath}</p>}
+          </div>
+        </div>
+
+        {/* Right: full ResultPanel for selected FL */}
+        {selectedFlResult && !selectedFlResult.error && (
+          <ResultPanel
+            result={flResultToCalibResult(selectedFlResult, imageSize)}
+            imageSize={imageSize}
+            ws={ws}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [connStatus, setConnStatus] = useState<ConnStatus>('connecting');
   const [backendPort, setBackendPort] = useState(8000);
+  const [localIp, setLocalIp] = useState<string | null>(null);
   const [ws, setWs] = useState<WebSocket | null>(null);
   const [tab, setTab] = useState<'file' | 'live' | 'results' | 'settings'>('file');
 
@@ -67,8 +281,16 @@ export default function App() {
   const [excluded, setExcluded] = useState<Set<string>>(new Set());
   const [calibrating, setCalibrating] = useState(false);
   const [calibResult, setCalibResult] = useState<CalibrationResult | null>(null);
+  const [calibError, setCalibError] = useState<string | null>(null);
   const [calibImageSize, setCalibImageSize] = useState<[number, number]>([1920, 1080]);
   const [calibFrames, setCalibFrames] = useState<PreviewFrame[]>([]);
+
+  // Zoom calibration result (from GuidedCapture multi-FL path)
+  const [zoomResult, setZoomResult] = useState<ZoomCalibResult | null>(null);
+  const [zoomImageSize, setZoomImageSize] = useState<[number, number]>([1920, 1080]);
+  const [zoomExportStatus, setZoomExportStatus] = useState<'idle'|'loading'|'success'|'error'>('idle');
+  const [zoomExportPath, setZoomExportPath] = useState<string | null>(null);
+  const [selectedZoomFlMm, setSelectedZoomFlMm] = useState<number | null>(null);
 
   // Refs hold context set just before the calibrate WS message is sent,
   // so the calibrate_result handler can read the correct imageSize/frames.
@@ -178,18 +400,42 @@ export default function App() {
     ws.send(JSON.stringify({ action: 'list_devices' }));
   };
 
+  // Fetch local IP on mount (for network access display)
+  useEffect(() => {
+    (async () => {
+      try {
+        if (window.electronAPI?.getLocalIP) {
+          const ip = await window.electronAPI.getLocalIP();
+          setLocalIp(ip);
+        }
+      } catch {
+        setLocalIp('localhost');
+      }
+    })();
+  }, []);
+
   // Single calibrate_result listener — works for both file and live tabs
   useEffect(() => {
     if (!ws) return;
     const handler = (e: MessageEvent) => {
       try {
         const msg = JSON.parse(e.data);
-        if (msg.action !== 'calibrate_result') return;
-        setCalibResult(msg as CalibrationResult);
-        setCalibrating(false);
-        setCalibImageSize(pendingImageSizeRef.current);
-        setCalibFrames(pendingFramesRef.current);
-        setTab('results');
+        if (msg.action === 'calibrate_result') {
+          setCalibrating(false);
+          setTab('results');
+          if (msg.error || msg.rms == null) {
+            setCalibError(msg.error ?? 'Calibration failed — check your frames and try again.');
+            setCalibResult(null);
+          } else {
+            setCalibError(null);
+            setCalibResult(msg as CalibrationResult);
+            setCalibImageSize(pendingImageSizeRef.current);
+            setCalibFrames(pendingFramesRef.current);
+          }
+        } else if (msg.action === 'export_result' && msg.format === 'ue5_ulens_zoom') {
+          setZoomExportStatus(msg.success ? 'success' : 'error');
+          if (msg.success) setZoomExportPath(msg.output_path);
+        }
       } catch { /* ignore */ }
     };
     ws.addEventListener('message', handler);
@@ -237,6 +483,15 @@ export default function App() {
     pendingFramesRef.current    = previewFrames;
   };
 
+  // Called by GuidedCapture when zoom calibration completes
+  const onZoomCalibrationComplete = (result: ZoomCalibResult, imgSize: [number, number]) => {
+    setZoomResult(result);
+    setZoomImageSize(imgSize);
+    setZoomExportStatus('idle');
+    setZoomExportPath(null);
+    setTab('results');
+  };
+
   const TABS = [
     { key: 'file',     label: 'File Calibration' },
     { key: 'live',     label: 'Live Calibration' },
@@ -263,12 +518,24 @@ export default function App() {
               }`}
             >
               {t.label}
-              {t.key === 'results' && calibResult && tab !== 'results' && (
+              {t.key === 'results' && (calibResult || zoomResult) && tab !== 'results' && (
                 <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-emerald-400" />
               )}
             </button>
           ))}
         </nav>
+        <div className="ml-auto flex items-center gap-3">
+          <div className="flex items-center gap-2 text-xs">
+            <span className={`w-2 h-2 rounded-full ${STATUS_DOT[connStatus] ?? 'bg-slate-500'}`} />
+            <span className="text-slate-400">{connStatus}</span>
+          </div>
+          {localIp && (
+            <div className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-700/50 border border-slate-600/50 text-[11px] font-mono text-slate-300">
+              <span>📱</span>
+              <span>http://{localIp}:5173</span>
+            </div>
+          )}
+        </div>
       </header>
 
       {/* Main content */}
@@ -351,6 +618,7 @@ export default function App() {
             boardSettings={boardSettings}
             backendPort={backendPort}
             onCalibrationSent={onGuidedCalibrationSent}
+            onZoomCalibrationComplete={onZoomCalibrationComplete}
             selectedIdx={selectedIdx}
             selectedDeviceName={devices.find(d => d.index === selectedIdx)?.name ?? null}
             detectedW={detectedW}
@@ -513,7 +781,12 @@ export default function App() {
 
         {/* ── RESULTS ── */}
         {tab === 'results' && (
-          calibResult ? (
+          calibError ? (
+            <div className="flex flex-col items-center justify-center h-64 gap-3">
+              <span className="text-red-400 text-sm font-semibold">Calibration failed</span>
+              <span className="text-slate-400 text-xs text-center max-w-lg">{calibError}</span>
+            </div>
+          ) : calibResult ? (
             <div className="grid grid-cols-5 gap-5 items-start">
               <div className="col-span-2">
                 <ResultPanel result={calibResult} imageSize={calibImageSize} ws={ws} />
@@ -527,6 +800,19 @@ export default function App() {
                 />
               </div>
             </div>
+          ) : zoomResult ? (
+            <ZoomResultsPanel
+              result={zoomResult}
+              imageSize={zoomImageSize}
+              ws={ws}
+              lensSettings={lensSettings}
+              cameraSettings={cameraSettings}
+              exportStatus={zoomExportStatus}
+              exportPath={zoomExportPath}
+              onExportStatusChange={setZoomExportStatus}
+              selectedFlMm={selectedZoomFlMm}
+              onSelectFl={setSelectedZoomFlMm}
+            />
           ) : (
             <div className="flex items-center justify-center h-64 text-slate-500 text-sm">
               No calibration results yet. Run a calibration from the File or Live Capture tab.
@@ -553,6 +839,12 @@ export default function App() {
           <>
             <span className="text-slate-700">|</span>
             <span>RMS {calibResult.rms.toFixed(3)} px · {calibResult.confidence}</span>
+          </>
+        )}
+        {zoomResult && !calibResult && (
+          <>
+            <span className="text-slate-700">|</span>
+            <span>Zoom: {zoomResult.fl_results.length} FLs calibrated</span>
           </>
         )}
       </footer>

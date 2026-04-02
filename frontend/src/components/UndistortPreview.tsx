@@ -96,6 +96,10 @@ export default function UndistortPreview({ scoredFrames, cameraMatrix, distCoeff
   // Request preview whenever selection changes
   useEffect(() => {
     if (!selected || !ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!cameraMatrix || !distCoeffs || cameraMatrix.length === 0 || distCoeffs.length === 0) {
+      setError('Camera calibration data not available');
+      return;
+    }
     setLoading(true);
     setImages(null);
     setError(null);
@@ -107,7 +111,7 @@ export default function UndistortPreview({ scoredFrames, cameraMatrix, distCoeff
         dist_coeffs: distCoeffs,
       })
     );
-  }, [selected?.path, ws]);
+  }, [selected?.path, ws, cameraMatrix, distCoeffs]);
 
   // Drag-to-split on the image container
   const onPointerDown = (e: React.PointerEvent) => {
@@ -191,14 +195,14 @@ export default function UndistortPreview({ scoredFrames, cameraMatrix, distCoeff
           <>
             {/* Original — bottom layer, always full width */}
             <img
-              src={`data:image/jpeg;base64,${images.original}`}
+              src={images.original}
               className="absolute inset-0 w-full h-full object-contain pointer-events-none"
               draggable={false}
             />
 
             {/* Undistorted — top layer, revealed from the left */}
             <img
-              src={`data:image/jpeg;base64,${images.undistorted}`}
+              src={images.undistorted}
               className="absolute inset-0 w-full h-full object-contain pointer-events-none"
               style={{ clipPath: `inset(0 ${100 - splitPos}% 0 0)` }}
               draggable={false}
