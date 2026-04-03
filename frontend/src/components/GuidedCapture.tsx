@@ -40,6 +40,8 @@ interface FlGroup {
   fl_mm: number;
   frames: ScoredFrame[];
   status: 'pending' | 'capturing' | 'done';
+  /** Physical camera-to-chart distance used during capture (mm). 0 = unset. */
+  working_distance_mm: number;
 }
 
 export interface ZoomFlResult {
@@ -464,7 +466,7 @@ export default function GuidedCapture({ ws, boardSettings, onCalibrationSent, on
 
   const addFl = (fl: number) => {
     if (isNaN(fl) || fl <= 0 || flGroups.some(g => g.fl_mm === fl)) return;
-    const updated = [...flGroups, { fl_mm: fl, frames: [], status: 'pending' as const }].sort((a, b) => a.fl_mm - b.fl_mm);
+    const updated = [...flGroups, { fl_mm: fl, frames: [], status: 'pending' as const, working_distance_mm: 0 }].sort((a, b) => a.fl_mm - b.fl_mm);
     setFlGroups(updated);
     // Auto-select the new FL if nothing is currently selected
     if (activeFlIdx === null) {
@@ -540,7 +542,7 @@ export default function GuidedCapture({ ws, boardSettings, onCalibrationSent, on
     setCalibratingZoom(true);
     ws.send(JSON.stringify({
       action: 'calibrate_zoom',
-      fl_groups: readyGroups.map(g => ({ focal_length_mm: g.fl_mm, frames: g.frames })),
+      fl_groups: readyGroups.map(g => ({ focal_length_mm: g.fl_mm, frames: g.frames, working_distance_mm: g.working_distance_mm || 0 })),
       board_cols: boardSettings.cols, board_rows: boardSettings.rows,
       square_size_mm: boardSettings.squareSizeMm, image_size: actualSize,
       sensor_width_mm: parseFloat(cameraSettings.sensorWidthMm) || 0,
@@ -736,7 +738,7 @@ export default function GuidedCapture({ ws, boardSettings, onCalibrationSent, on
                     const midVal = (mid && mid > mn && mid < mx) ? mid : Math.round((mn + mx) / 2);
                     pts = [mn, midVal, mx];
                   }
-                  const newGroups = pts.map(fl => ({ fl_mm: fl, frames: [] as ScoredFrame[], status: 'pending' as const }));
+                  const newGroups = pts.map(fl => ({ fl_mm: fl, frames: [] as ScoredFrame[], status: 'pending' as const, working_distance_mm: 0 }));
                   setFlGroups(newGroups);
                   setActiveFlIdx(0);
                 }}
@@ -780,7 +782,9 @@ export default function GuidedCapture({ ws, boardSettings, onCalibrationSent, on
         <p className="text-[11px] text-slate-500">
           {fixedMount
             ? <>Fixed chart on a stand — mount camera on a tripod and only pan, tilt, or zoom. Set working distance so the chart is <span className="text-slate-300">visible at your widest focal length</span>, then capture all FLs without moving the camera body.</>
-            : <>Keep the camera at the same working distance for all focal lengths — only rotate the zoom ring. Aim for {MIN_FRAMES_PER_FL}+ frames each.</>
+            : flGroups.length > 1
+              ? <><span className="text-slate-400 font-medium">Zoom lens tip:</span> at longer focal lengths the chart will overflow the frame. Step back so it fills ~60% of frame height at each FL — distance scales with the zoom ratio. Aim for {MIN_FRAMES_PER_FL}+ frames each.</>
+              : <>Keep the camera at the same working distance for all focal lengths — only rotate the zoom ring. Aim for {MIN_FRAMES_PER_FL}+ frames each.</>
           }
         </p>
       </div>
@@ -962,12 +966,17 @@ export default function GuidedCapture({ ws, boardSettings, onCalibrationSent, on
               <p className="text-xs text-slate-500 italic">Add focal lengths above</p>
             ) : (
               <div className="space-y-2">
-                {flGroups.map((g, i) => {
-                  const goodFrames = g.frames.filter(f => f.quality !== 'fail').length;
+                {(() => {
+                  const wideFl = flGroups.length > 0 ? Math.min(...flGroups.map(g => g.fl_mm)) : null;
+                  return flGroups.map((g, i) => {
+                  const goodFrames  = g.frames.filter(f => f.quality !== 'fail').length;
                   const capturedCount = g.frames.length;
-                  const ready      = g.status === 'done' && goodFrames >= MIN_FRAMES_PER_FL;
-                  const isActive   = activeFlIdx === i;
+                  const ready       = g.status === 'done' && goodFrames >= MIN_FRAMES_PER_FL;
+                  const isActive    = activeFlIdx === i;
                   const isCapturing = isActive && running;
+                  // Step-back ratio relative to the widest FL (only shown for zoom setups)
+                  const ratio = wideFl && flGroups.length > 1 && g.fl_mm > wideFl
+                    ? (g.fl_mm / wideFl) : null;
                   return (
                     <div key={g.fl_mm} onClick={() => !running && setActiveFlIdx(i)}
                       className={`flex items-center gap-3 px-3 py-2.5 rounded-lg border cursor-pointer transition-colors ${
@@ -980,17 +989,26 @@ export default function GuidedCapture({ ws, boardSettings, onCalibrationSent, on
                         {ready ? '✓' : isCapturing ? '●' : '○'}
                       </span>
                       <div className="flex-1 min-w-0">
-                        <span className={`text-sm font-semibold ${ready ? 'text-emerald-300' : isActive ? 'text-blue-300' : 'text-slate-300'}`}>
-                          {g.fl_mm} mm
-                        </span>
+                        <div className="flex items-baseline gap-2 flex-wrap">
+                          <span className={`text-sm font-semibold ${ready ? 'text-emerald-300' : isActive ? 'text-blue-300' : 'text-slate-300'}`}>
+                            {g.fl_mm} mm
+                          </span>
+                          {ratio !== null && (
+                            <span
+                              className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/30 text-amber-300 font-medium"
+                              title={`Step back to ≈${ratio.toFixed(1)}× your ${wideFl}mm distance so the chart fills ~60% of frame`}>
+                              {ratio.toFixed(1)}× distance
+                            </span>
+                          )}
+                        </div>
                         {g.status === 'done' && (
-                          <span className="ml-2 text-[10px] text-slate-500">
+                          <span className="text-[10px] text-slate-500">
                             {capturedCount} captured · {goodFrames} usable
                           </span>
                         )}
-                        {g.status === 'pending' && !isActive && <span className="ml-2 text-[10px] text-slate-600">pending</span>}
-                        {isActive && !running && g.status !== 'done' && <span className="ml-2 text-[10px] text-blue-400">ready to capture</span>}
-                        {isCapturing && <span className="ml-2 text-[10px] text-blue-400">capturing…</span>}
+                        {g.status === 'pending' && !isActive && <span className="text-[10px] text-slate-600">pending</span>}
+                        {isActive && !running && g.status !== 'done' && <span className="text-[10px] text-blue-400">ready to capture</span>}
+                        {isCapturing && <span className="text-[10px] text-blue-400">capturing…</span>}
                       </div>
                       {!running && (
                         <button type="button" onClick={e => { e.stopPropagation(); removeFl(g.fl_mm); }}
@@ -998,7 +1016,8 @@ export default function GuidedCapture({ ws, boardSettings, onCalibrationSent, on
                       )}
                     </div>
                   );
-                })}
+                });
+                })()}
               </div>
             )}
 

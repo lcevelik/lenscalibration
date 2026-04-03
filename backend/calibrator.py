@@ -168,10 +168,9 @@ def run_calibration(
     usable = [f for f in usable if (f.get("detection_type") or "checkerboard") == selected_det]
 
     # --- Object points (3-D grid, z = 0) ------------------------------------
-    objp = np.zeros((board_rows * board_cols, 3), dtype=np.float32)
-    objp[:, :2] = (
-        np.mgrid[0:board_cols, 0:board_rows].T.reshape(-1, 2) * square_size_mm
-    )
+    # Full-board template; partial frames get their own per-frame objp via
+    # the partial_grid_size field written by frame_scorer.
+    full_objp = _make_objp(board_cols, board_rows, square_size_mm)
 
     obj_points = []
     img_points = []
@@ -181,6 +180,7 @@ def run_calibration(
     for frame in usable:
         corners = np.array(frame["corners"], dtype=np.float32).reshape(-1, 1, 2)
         frame_obj_points = frame.get("obj_points")
+        partial_size = frame.get("partial_grid_size")
         if frame_obj_points:
             obj = np.array(frame_obj_points, dtype=np.float32).reshape(-1, 3)
             if obj.shape[0] != corners.shape[0] or obj.shape[0] < 6:
@@ -190,10 +190,15 @@ def run_calibration(
                 # convert to mm so translation/nodal scale is meaningful.
                 obj = obj * float(square_size_mm)
             sparse_mode = True
+        elif partial_size:
+            p_cols, p_rows = int(partial_size[0]), int(partial_size[1])
+            if corners.shape[0] != p_cols * p_rows:
+                continue
+            obj = _make_objp(p_cols, p_rows, square_size_mm)
         else:
             if corners.shape[0] != board_rows * board_cols:
                 continue
-            obj = objp
+            obj = full_objp
         if squeeze_ratio > 1.0:
             corners = corners.copy()
             corners[:, :, 0] *= squeeze_ratio  # scale x to de-squeezed space
@@ -306,6 +311,13 @@ def run_calibration(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _make_objp(cols: int, rows: int, square_size_mm: float) -> np.ndarray:
+    """Build a planar (z=0) object-point array for a cols×rows inner-corner grid."""
+    pts = np.zeros((rows * cols, 3), dtype=np.float32)
+    pts[:, :2] = np.mgrid[0:cols, 0:rows].T.reshape(-1, 2) * square_size_mm
+    return pts
+
 
 def _confidence(rms: float) -> str:
     if rms < 0.3:
