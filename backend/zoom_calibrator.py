@@ -85,6 +85,46 @@ def _fit_or_pchip(fls: np.ndarray, values: np.ndarray, model, query: np.ndarray,
 from nodal_model import fit_nodal_model, predict_nodal
 
 
+def _estimate_scale_mm(points_xyz: np.ndarray) -> float:
+    """
+    Estimate a robust spatial scale for a set of object points.
+
+    Using a normalized point cloud improves PnP/calibration conditioning when
+    chart dimensions are very large, while keeping the recovered translation in
+    physical millimetres after de-normalization.
+    """
+    pts = np.asarray(points_xyz, dtype=np.float64).reshape(-1, 3)
+    if pts.size == 0:
+        return 1.0
+
+    mins = np.min(pts, axis=0)
+    maxs = np.max(pts, axis=0)
+    diag = float(np.linalg.norm(maxs - mins))
+    if np.isfinite(diag) and diag > 1e-6:
+        return diag
+
+    radius = float(np.max(np.linalg.norm(pts, axis=1)))
+    if np.isfinite(radius) and radius > 1e-6:
+        return radius
+
+    return 1.0
+
+
+def _estimate_group_scale_mm(obj_points: list[np.ndarray]) -> float:
+    """Estimate one normalization scale for an FL group of object-point sets."""
+    if not obj_points:
+        return 1.0
+    merged = np.concatenate([np.asarray(o, dtype=np.float64).reshape(-1, 3) for o in obj_points], axis=0)
+    return _estimate_scale_mm(merged)
+
+
+def _camera_center_from_rt(rvec: np.ndarray, tvec: np.ndarray, scale_mm: float = 1.0) -> np.ndarray:
+    """Convert (rvec, tvec) to camera center in world coordinates and de-normalize scale."""
+    R, _ = cv2.Rodrigues(rvec)
+    center = (-R.T @ tvec).flatten()
+    return np.asarray(center, dtype=np.float64) * float(scale_mm)
+
+
 def run_zoom_calibration(
     fl_groups: list,        # [{focal_length_mm, frames: [scored_frame, ...]}, ...]
     board_cols: int,
@@ -260,9 +300,12 @@ def run_zoom_calibration(
                 | cv2.CALIB_FIX_K3
                 | cv2.CALIB_ZERO_TANGENT_DIST
             )
+        group_scale_mm = _estimate_group_scale_mm(obj_points)
+        obj_points_norm = [np.asarray(obj, dtype=np.float32) / float(group_scale_mm) for obj in obj_points]
+
         try:
             rms, cam_mtx, dist_c, rvecs, tvecs = cv2.calibrateCamera(
-                obj_points, img_points, calib_size, cam0, dc0, flags=calib_flags
+                obj_points_norm, img_points, calib_size, cam0, dc0, flags=calib_flags
             )
         except Exception as exc:
             # calibrateCamera failed (e.g. all-partial, poorly conditioned).
@@ -281,7 +324,7 @@ def run_zoom_calibration(
         if _is_implausible_solution(cam_mtx, dist_c, calib_size):
             try:
                 rms_fb, cam_fb, dist_fb, rv_fb, tv_fb = _run_constrained_fallback(
-                    obj_points, img_points, calib_size
+                    obj_points_norm, img_points, calib_size
                 )
                 if _is_implausible_solution(cam_fb, dist_fb, calib_size):
                     fl_results.append({
@@ -336,8 +379,7 @@ def run_zoom_calibration(
         # ── Optical centre for each image ──────────────────────────────────
         centers = []
         for rv, tv in zip(rvecs, tvecs):
-            R, _ = cv2.Rodrigues(rv)
-            centers.append((-R.T @ tv).flatten())
+            centers.append(_camera_center_from_rt(rv, tv, group_scale_mm))
         mean_center = np.mean(centers, axis=0).copy()
 
         # Working-distance correction: when the user stepped back to keep
@@ -356,7 +398,7 @@ def run_zoom_calibration(
         # ── Per-image reprojection errors ──────────────────────────────────
         pie = []
         for i, (obj, img, rv, tv) in enumerate(
-                zip(obj_points, img_points, rvecs, tvecs)):
+                zip(obj_points_norm, img_points, rvecs, tvecs)):
             proj, _ = cv2.projectPoints(obj, rv, tv, cam_mtx, dist_c)
             err = float(np.sqrt(np.mean(
                 np.sum((img.reshape(-1, 2) - proj.reshape(-1, 2)) ** 2, axis=1)
@@ -417,8 +459,10 @@ def run_zoom_calibration(
                 img_pnp = np.array(img, dtype=np.float32).reshape(-1, 1, 2)
                 if obj_pnp.shape[0] < 6:
                     continue
+                pnp_scale_mm = _estimate_scale_mm(obj_pnp)
+                obj_pnp_norm = obj_pnp / float(pnp_scale_mm)
                 ok, rvec, tvec = cv2.solvePnP(
-                    obj_pnp,
+                    obj_pnp_norm,
                     img_pnp,
                     ref_cam,
                     ref_dc,
@@ -426,9 +470,8 @@ def run_zoom_calibration(
                 )
                 if not ok:
                     continue
-                R, _ = cv2.Rodrigues(rvec)
-                centers.append((-R.T @ tvec).flatten())
-                proj, _ = cv2.projectPoints(obj_pnp, rvec, tvec, ref_cam, ref_dc)
+                centers.append(_camera_center_from_rt(rvec, tvec, pnp_scale_mm))
+                proj, _ = cv2.projectPoints(obj_pnp_norm, rvec, tvec, ref_cam, ref_dc)
                 err = float(np.sqrt(np.mean(
                     np.sum((img_pnp.reshape(-1, 2) - proj.reshape(-1, 2)) ** 2, axis=1)
                 )))
@@ -553,14 +596,15 @@ def _pose_only_calibration(
             corners[:, :, 0] *= squeeze_ratio
 
         try:
+            pnp_scale_mm = _estimate_scale_mm(obj)
+            obj_norm = obj / float(pnp_scale_mm)
             ok, rvec, tvec = cv2.solvePnP(
-                obj, corners, K_fixed, D_ref,
+                obj_norm, corners, K_fixed, D_ref,
                 flags=cv2.SOLVEPNP_ITERATIVE,
             )
             if not ok:
                 continue
-            R, _ = cv2.Rodrigues(rvec)
-            centers.append((-R.T @ tvec).flatten())
+            centers.append(_camera_center_from_rt(rvec, tvec, pnp_scale_mm))
         except Exception:
             continue
 
