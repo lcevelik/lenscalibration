@@ -2,8 +2,32 @@
 Zoom sweep calibration: calibrate at multiple focal lengths and estimate
 per-FL nodal offsets from optical-center geometry.
 
-For accurate nodal offsets keep the camera at a similar working distance
-for all focal lengths — only change the zoom ring.
+Working-distance guidance
+-------------------------
+For accurate nodal offsets across the full zoom range the user should keep
+the calibration chart at a consistent *angular size* in the frame — not at a
+fixed physical distance.  At longer focal lengths, step the camera (or chart)
+back so the chart fills roughly the same fraction of the frame:
+
+    d(f) = d_wide × (f / f_wide)
+
+When each FL group carries a ``working_distance_mm`` field, the backend
+subtracts the per-FL physical distance from the raw optical-centre Z so that
+all groups share the same body-fixed coordinate origin.  Without this field
+(or when it is 0) the legacy behaviour is preserved (assumes same distance).
+
+Partial-board frames
+--------------------
+Frames where only a sub-region of the chart is visible (telephoto overflow)
+carry a ``partial_grid_size`` field set by frame_scorer.  The calibrator uses
+that sub-grid size to build the correct per-frame object-point array instead
+of the full-board template.
+
+Nodal extrapolation
+-------------------
+After PCHIP interpolation of measured points, a Padé (2,1) rational model is
+fitted to the measured nodal offsets and used to extend the table beyond the
+calibrated FL range (up to the outermost *requested* FL).
 
 Interpolation uses physics-informed models that match actual lens optics:
   - fx/fy (pixels)     : linear in fl_mm  (optics law: f_px ∝ f_mm)
@@ -58,6 +82,8 @@ def _fit_or_pchip(fls: np.ndarray, values: np.ndarray, model, query: np.ndarray,
         fallback_pchip = PchipInterpolator(fls, values)
     return fallback_pchip(query)
 
+from nodal_model import fit_nodal_model, predict_nodal
+
 
 def run_zoom_calibration(
     fl_groups: list,        # [{focal_length_mm, frames: [scored_frame, ...]}, ...]
@@ -73,6 +99,11 @@ def run_zoom_calibration(
     Run a separate calibration for each focal-length group and derive
     per-FL nodal offsets from the mean optical-centre position.
 
+    Each group dict may include an optional ``working_distance_mm`` key.
+    When present, the raw optical-centre Z is corrected by subtracting the
+    physical camera-to-chart distance so that nodal offsets across groups
+    measured at different distances are directly comparable.
+
     Returns
     -------
     {
@@ -85,16 +116,16 @@ def run_zoom_calibration(
            per_image_errors, confidence, error?}, ...
         ],
         nodal_offsets_mm: {str(fl_mm): float, ...},   # Z-shift vs best-RMS FL
+        nodal_model: dict | None,                      # Padé/poly model for export
     }
     """
-    objp = np.zeros((board_rows * board_cols, 3), dtype=np.float32)
-    objp[:, :2] = (
-        np.mgrid[0:board_cols, 0:board_rows].T.reshape(-1, 2) * square_size_mm
-    )
+    full_objp = _make_objp(board_cols, board_rows, square_size_mm)
 
     fl_results: list[dict] = []
-    optical_centers: list          = []   # None or np.ndarray per group
-    pending_nodal: list[dict] = []
+    optical_centers: list          = []   # None or np.ndarray (corrected) per group
+    K_best: np.ndarray | None      = None  # camera matrix from lowest-RMS FL so far
+    D_best: np.ndarray | None      = None  # dist coeffs from lowest-RMS FL so far
+    pending_nodal: list[dict]      = []   # FLs needing PnP-only nodal estimation
 
     def _is_implausible_solution(cam_mtx: np.ndarray, dist_c: np.ndarray, calib_size_local: tuple) -> bool:
         w, h = calib_size_local
@@ -143,10 +174,11 @@ def run_zoom_calibration(
         )
 
     for group in fl_groups:
-        fl_mm   = float(group["focal_length_mm"])
-        frames  = group.get("frames", [])
-        usable  = [f for f in frames
-                   if f.get("quality") != "fail" and f.get("corners")]
+        fl_mm           = float(group["focal_length_mm"])
+        frames          = group.get("frames", [])
+        working_dist_mm = float(group.get("working_distance_mm", 0.0))
+        usable          = [f for f in frames
+                           if f.get("quality") != "fail" and f.get("corners")]
 
         if len(usable) < 3:
             fl_results.append({
@@ -173,6 +205,7 @@ def run_zoom_calibration(
         for frame in usable:
             corners = np.array(frame["corners"], dtype=np.float32).reshape(-1, 1, 2)
             frame_obj_points = frame.get("obj_points")
+            partial_size = frame.get("partial_grid_size")
             if frame_obj_points:
                 obj = np.array(frame_obj_points, dtype=np.float32).reshape(-1, 3)
                 if obj.shape[0] != corners.shape[0] or obj.shape[0] < 6:
@@ -180,23 +213,31 @@ def run_zoom_calibration(
                 if (frame.get("detection_type") or "") == "aruco_grid":
                     obj = obj * float(square_size_mm)
                 sparse_mode = True
+            elif partial_size:
+                p_cols, p_rows = int(partial_size[0]), int(partial_size[1])
+                if corners.shape[0] != p_cols * p_rows:
+                    continue
+                obj = _make_objp(p_cols, p_rows, square_size_mm)
             else:
                 if corners.shape[0] != board_rows * board_cols:
                     continue
-                obj = objp
+                obj = full_objp
             if squeeze_ratio > 1.0:
                 corners = corners.copy()
-                corners[:, :, 0] *= squeeze_ratio  # scale x to de-squeezed space
+                corners[:, :, 0] *= squeeze_ratio
             obj_points.append(obj)
             img_points.append(corners)
             paths.append(frame.get("path", ""))
 
         if len(obj_points) < 3:
-            fl_results.append({
-                "focal_length_mm": fl_mm, "rms": None,
-                "error": "Not enough corners after filtering",
-            })
-            optical_centers.append(None)
+            # Not enough frames even after corner-count validation.
+            # If we have a K from a previous FL, attempt pose-only estimation.
+            pose_result = _pose_only_calibration(
+                usable, K_best, D_best, board_cols, board_rows,
+                square_size_mm, squeeze_ratio, working_dist_mm, fl_mm,
+            )
+            fl_results.append(pose_result)
+            optical_centers.append(pose_result.get("_mean_center"))
             continue
 
         calib_size = (int(image_size[0] * squeeze_ratio), image_size[1]) if squeeze_ratio > 1.0 else image_size
@@ -224,16 +265,16 @@ def run_zoom_calibration(
                 obj_points, img_points, calib_size, cam0, dc0, flags=calib_flags
             )
         except Exception as exc:
-            pending_nodal.append({
-                "index": len(fl_results),
-                "obj_points": obj_points,
-                "img_points": img_points,
-                "paths": paths,
-                "focal_length_mm": fl_mm,
-                "detection_type": selected_det,
-            })
-            fl_results.append({"focal_length_mm": fl_mm, "rms": None, "error": str(exc)})
-            optical_centers.append(None)
+            # calibrateCamera failed (e.g. all-partial, poorly conditioned).
+            # Fall back to pose-only path with fixed K from nearest calibrated FL.
+            pose_result = _pose_only_calibration(
+                usable, K_best, D_best, board_cols, board_rows,
+                square_size_mm, squeeze_ratio, working_dist_mm, fl_mm,
+            )
+            if pose_result.get("rms") is None:
+                pose_result["error"] = str(exc)
+            fl_results.append(pose_result)
+            optical_centers.append(pose_result.get("_mean_center"))
             continue
 
         solve_warning = None
@@ -253,28 +294,17 @@ def run_zoom_calibration(
                 rms, cam_mtx, dist_c, rvecs, tvecs = rms_fb, cam_fb, dist_fb, rv_fb, tv_fb
                 solve_warning = "Used constrained tele fallback solver (k2/k3 fixed, tangential fixed)."
             except Exception:
-                fl_results.append({
-                    "focal_length_mm": fl_mm,
-                    "rms": None,
-                    "error": "Implausible calibration solution for this FL. Capture more varied poses/frames.",
-                })
-                pending_nodal.append({
-                    "index": len(fl_results) - 1,
-                    "obj_points": obj_points,
-                    "img_points": img_points,
-                    "paths": paths,
-                    "focal_length_mm": fl_mm,
-                    "detection_type": selected_det,
-                })
-                pending_nodal.append({
-                    "index": len(fl_results) - 1,
-                    "obj_points": obj_points,
-                    "img_points": img_points,
-                    "paths": paths,
-                    "focal_length_mm": fl_mm,
-                    "detection_type": selected_det,
-                })
-                optical_centers.append(None)
+                # Constrained fallback also failed — use pose-only with best known K.
+                pose_result = _pose_only_calibration(
+                    usable, K_best, D_best, board_cols, board_rows,
+                    square_size_mm, squeeze_ratio, working_dist_mm, fl_mm,
+                )
+                pose_result.setdefault(
+                    "error",
+                    "Implausible calibration solution for this FL. Capture more varied poses/frames.",
+                )
+                fl_results.append(pose_result)
+                optical_centers.append(pose_result.get("_mean_center"))
                 continue
 
         if (not np.isfinite(rms)) or (rms > 5.0):
@@ -303,15 +333,27 @@ def run_zoom_calibration(
         fl_computed = (fx_px * sensor_width_mm / calib_size[0]
                        if sensor_width_mm > 0 else 0.0)
 
-        # ── Optical centre for each image ──────────────────────────────
+        # ── Optical centre for each image ──────────────────────────────────
         centers = []
         for rv, tv in zip(rvecs, tvecs):
             R, _ = cv2.Rodrigues(rv)
             centers.append((-R.T @ tv).flatten())
-        mean_center = np.mean(centers, axis=0)
+        mean_center = np.mean(centers, axis=0).copy()
+
+        # Working-distance correction: when the user stepped back to keep
+        # the chart visible at this FL, subtract the extra distance so all
+        # groups are expressed in the same body-fixed coordinate frame.
+        if working_dist_mm > 0:
+            mean_center[2] -= working_dist_mm
+
         optical_centers.append(mean_center)
 
-        # ── Per-image reprojection errors ──────────────────────────────
+        # Track best K for fallback use in subsequent (harder) FL groups
+        if K_best is None or rms < (fl_results[-1].get("rms") or float("inf") if fl_results else float("inf")):
+            K_best = cam_mtx.copy()
+            D_best = dist_c.copy()
+
+        # ── Per-image reprojection errors ──────────────────────────────────
         pie = []
         for i, (obj, img, rv, tv) in enumerate(
                 zip(obj_points, img_points, rvecs, tvecs)):
@@ -321,7 +363,6 @@ def run_zoom_calibration(
             )))
             pie.append({"path": paths[i], "error": round(err, 4), "outlier": False})
 
-        # IQR-based outlier detection (robust to skewed distributions)
         pie_arr = np.array([e["error"] for e in pie])
         q1, q3 = float(np.percentile(pie_arr, 25)), float(np.percentile(pie_arr, 75))
         iqr = q3 - q1
@@ -330,28 +371,33 @@ def run_zoom_calibration(
             entry["outlier"] = entry["error"] > pie_threshold
 
         fl_results.append({
-            "focal_length_mm":         fl_mm,
-            "rms":                     round(rms, 4),
-            "fx_px":                   round(fx_px, 2),
-            "fy_px":                   round(fy_px, 2),
-            "cx_px":                   round(cx_px, 2),
-            "cy_px":                   round(cy_px, 2),
+            "focal_length_mm":          fl_mm,
+            "rms":                      round(rms, 4),
+            "fx_px":                    round(fx_px, 2),
+            "fy_px":                    round(fy_px, 2),
+            "cx_px":                    round(cx_px, 2),
+            "cy_px":                    round(cy_px, 2),
             "focal_length_computed_mm": round(fl_computed, 2),
-            "dist_coeffs":             dc.tolist(),
-            "camera_matrix":           cam_mtx.tolist(),
-            "optical_center_world":    mean_center.tolist(),
-            "used_frames":             len(obj_points),
-            "per_image_errors":        pie,
-            "confidence":              _confidence(rms),
-            "detection_type":          selected_det,
-            "warning":                 solve_warning,
-            "error":                   None,
+            "dist_coeffs":              dc.tolist(),
+            "camera_matrix":            cam_mtx.tolist(),
+            "optical_center_world":     mean_center.tolist(),
+            "used_frames":              len(obj_points),
+            "per_image_errors":         pie,
+            "confidence":               _confidence(rms),
+            "detection_type":           selected_det,
+            "warning":                  solve_warning,
+            "error":                    None,
         })
 
-    # ── Nodal offsets: Z-shift vs the best-calibrated FL ──────────────
-    # Use the FL with the lowest RMS as the reference to minimise error
-    # propagation. Keys are formatted as integers or ".1f" floats so they
-    # match the lookup in export_ue5_ulens_zoom (which also uses str(fl_mm)).
+        # Update K_best tracking after appending result
+        valid_so_far = [r for r in fl_results if r.get("rms") is not None]
+        if valid_so_far:
+            best = min(valid_so_far, key=lambda r: r["rms"])
+            if best["focal_length_mm"] == fl_mm:
+                K_best = cam_mtx.copy()
+                D_best = dist_c.copy()
+
+    # ── Nodal offsets: Z-shift vs the best-calibrated FL ──────────────────
     valid = [(i, c) for i, c in enumerate(optical_centers) if c is not None]
 
     # If some FLs failed distortion solve, still estimate their nodal centre
@@ -415,8 +461,9 @@ def run_zoom_calibration(
     valid = [(i, c) for i, c in enumerate(optical_centers) if c is not None]
 
     nodal_offsets: dict[str, float] = {}
+    nodal_model_dict: dict | None = None
+
     if valid:
-        # Pick the index with the best (lowest) RMS among valid calibrations
         best_idx = min(
             valid,
             key=lambda v: fl_results[v[0]].get("rms") or float("inf"),
@@ -427,7 +474,22 @@ def run_zoom_calibration(
             key = str(int(fl_mm_val)) if fl_mm_val == int(fl_mm_val) else f"{fl_mm_val:.1f}"
             nodal_offsets[key] = round(float(center[2]) - ref_z, 2)
 
-    fl_interpolated = _interpolate_fl_table(fl_results, nodal_offsets)
+        # Fit Padé/poly model for extrapolation beyond calibrated range
+        if len(valid) >= 2:
+            try:
+                mfl = np.array([fl_results[i]["focal_length_mm"] for i, _ in valid])
+                mnz = np.array([nodal_offsets[
+                    str(int(fl_results[i]["focal_length_mm"]))
+                    if fl_results[i]["focal_length_mm"] == int(fl_results[i]["focal_length_mm"])
+                    else f"{fl_results[i]['focal_length_mm']:.1f}"
+                ] for i, _ in valid])
+                nodal_model_dict = fit_nodal_model(mfl, mnz)
+            except Exception:
+                nodal_model_dict = None
+
+    fl_interpolated = _interpolate_fl_table(
+        fl_results, nodal_offsets, fl_groups, nodal_model_dict
+    )
 
     return {
         "success":           True,
@@ -435,12 +497,116 @@ def run_zoom_calibration(
         "fl_results":        fl_results,
         "fl_interpolated":   fl_interpolated,
         "nodal_offsets_mm":  nodal_offsets,
+        "nodal_model":       nodal_model_dict,
         "squeeze_ratio":     squeeze_ratio,
         "lens_type":         "anamorphic" if squeeze_ratio > 1.0 else "spherical",
     }
 
 
-def _interpolate_fl_table(fl_results: list[dict], nodal_offsets: dict[str, float]) -> list[dict]:
+def _pose_only_calibration(
+    usable: list,
+    K_fixed: "np.ndarray | None",
+    D_fixed: "np.ndarray | None",
+    board_cols: int,
+    board_rows: int,
+    square_size_mm: float,
+    squeeze_ratio: float,
+    working_dist_mm: float,
+    fl_mm: float,
+) -> dict:
+    """
+    Estimate the optical centre using solvePnP with a fixed camera matrix.
+
+    Used as a fallback for focal-length groups where not enough full-board
+    frames are available for a standalone calibrateCamera call (e.g. at long
+    focal lengths where the chart partially overflows the frame).
+
+    Returns a fl_result dict.  The '_mean_center' key carries the corrected
+    optical-centre np.ndarray for nodal-offset computation (stripped before
+    the dict is returned to the caller).
+    """
+    if K_fixed is None:
+        return {
+            "focal_length_mm": fl_mm,
+            "rms": None,
+            "error": "No reference K available for pose-only calibration",
+        }
+
+    D_ref = D_fixed if D_fixed is not None else np.zeros((5, 1), dtype=np.float64)
+
+    centers = []
+    for frame in usable:
+        corners = np.array(frame["corners"], dtype=np.float32).reshape(-1, 1, 2)
+        partial_size = frame.get("partial_grid_size")
+        if partial_size:
+            p_cols, p_rows = int(partial_size[0]), int(partial_size[1])
+            if corners.shape[0] != p_cols * p_rows:
+                continue
+            obj = _make_objp(p_cols, p_rows, square_size_mm)
+        else:
+            if corners.shape[0] != board_rows * board_cols:
+                continue
+            obj = _make_objp(board_cols, board_rows, square_size_mm)
+
+        if squeeze_ratio > 1.0:
+            corners = corners.copy()
+            corners[:, :, 0] *= squeeze_ratio
+
+        try:
+            ok, rvec, tvec = cv2.solvePnP(
+                obj, corners, K_fixed, D_ref,
+                flags=cv2.SOLVEPNP_ITERATIVE,
+            )
+            if not ok:
+                continue
+            R, _ = cv2.Rodrigues(rvec)
+            centers.append((-R.T @ tvec).flatten())
+        except Exception:
+            continue
+
+    if len(centers) < 3:
+        return {
+            "focal_length_mm": fl_mm,
+            "rms": None,
+            "error": f"pose-only: only {len(centers)} valid poses from {len(usable)} frames",
+        }
+
+    mean_center = np.mean(centers, axis=0).copy()
+    if working_dist_mm > 0:
+        mean_center[2] -= working_dist_mm
+
+    fx = float(K_fixed[0, 0])
+    fy = float(K_fixed[1, 1])
+    cx = float(K_fixed[0, 2])
+    cy = float(K_fixed[1, 2])
+
+    result = {
+        "focal_length_mm":          fl_mm,
+        "rms":                      None,   # no full calibration
+        "fx_px":                    round(fx, 2),
+        "fy_px":                    round(fy, 2),
+        "cx_px":                    round(cx, 2),
+        "cy_px":                    round(cy, 2),
+        "focal_length_computed_mm": 0.0,
+        "dist_coeffs":              D_ref.flatten().tolist(),
+        "camera_matrix":            K_fixed.tolist(),
+        "optical_center_world":     mean_center.tolist(),
+        "used_frames":              len(centers),
+        "per_image_errors":         [],
+        "confidence":               "marginal",
+        "error":                    None,
+        "pose_only":                True,
+        "_mean_center":             mean_center,  # stripped by caller
+    }
+    return result
+
+
+def _interpolate_fl_table(
+    fl_results: list[dict],
+    nodal_offsets: dict[str, float],
+    fl_groups: list[dict] | None = None,
+    nodal_model_dict: dict | None = None,
+) -> list[dict]:
     """
     Build a dense, interpolated table of lens parameters using physics-informed
     curve models that match real lens optics behaviour.
@@ -456,12 +622,25 @@ def _interpolate_fl_table(fl_results: list[dict], nodal_offsets: dict[str, float
     Falls back to monotonic-cubic PCHIP for any parameter where the physics
     model fit residuals are too large (e.g. unusual optical design).
 
+    When a nodal_model_dict is provided, extends the table via the Padé/poly
+    model beyond the calibrated FL range up to the outermost *requested* FL
+    (determined from fl_groups).
+
     Requires ≥ 2 successfully calibrated focal lengths.
     """
     valid = sorted(
         [r for r in fl_results if r.get("rms") is not None],
         key=lambda r: r["focal_length_mm"],
     )
+
+    # Pose-only results (rms=None but optical_center_world present) can also
+    # contribute intrinsic parameters via extrapolation from the Padé model;
+    # include them in the PCHIP curve if they have fx_px etc.
+    pose_only = sorted(
+        [r for r in fl_results if r.get("rms") is None and r.get("fx_px") is not None],
+        key=lambda r: r["focal_length_mm"],
+    )
+
     if len(valid) < 2:
         return []
 
@@ -470,12 +649,24 @@ def _interpolate_fl_table(fl_results: list[dict], nodal_offsets: dict[str, float
     if fl_max - fl_min < 2.0:
         return []
 
-    # ── Build query grid (≤ 100 steps across the range) ─────────────────
-    step = max(1.0, (fl_max - fl_min) / 100)
-    query_fls = np.arange(fl_min, fl_max + step * 0.5, step)
-    calibrated_set = set(fls.tolist())
+    # Determine the full requested FL range (for extrapolation)
+    requested_fl_max = fl_max
+    if fl_groups:
+        all_requested = [float(g["focal_length_mm"]) for g in fl_groups]
+        if all_requested:
+            requested_fl_max = max(requested_fl_max, max(all_requested))
+    requested_fl_min = fl_min
+    if fl_groups:
+        all_requested = [float(g["focal_length_mm"]) for g in fl_groups]
+        if all_requested:
+            requested_fl_min = min(requested_fl_min, min(all_requested))
 
-    # ── Gather per-parameter arrays ─────────────────────────────────────
+    # ── Build query grid across the full requested range (≤ 200 steps) ──
+    calibrated_set = set(fls.tolist())
+    step = max(1.0, (requested_fl_max - requested_fl_min) / 200)
+    query_fls = np.arange(requested_fl_min, requested_fl_max + step * 0.5, step)
+
+    # ── Gather per-parameter arrays ──────────────────────────────────────
     def _nz_key(fl_mm: float) -> str:
         return str(int(fl_mm)) if fl_mm == int(fl_mm) else f"{fl_mm:.1f}"
 
@@ -493,8 +684,7 @@ def _interpolate_fl_table(fl_results: list[dict], nodal_offsets: dict[str, float
             for r in valid
         ], dtype=float))
 
-    # ── Choose model per parameter ───────────────────────────────────────
-    # Build PCHIP fallbacks (works for any ≥2 points)
+    # ── Build PCHIP fallbacks (works for any ≥2 points) ─────────────────
     pchip_fx  = PchipInterpolator(fls, fx_vals)
     pchip_fy  = PchipInterpolator(fls, fy_vals)
     pchip_cx  = PchipInterpolator(fls, cx_vals)
@@ -529,20 +719,46 @@ def _interpolate_fl_table(fl_results: list[dict], nodal_offsets: dict[str, float
         cam_cy = float(cy_interp[qi])
         dc     = [float(dc_interps[di][qi]) for di in range(dc_len)]
 
+        # Nodal offset: physics-informed interpolation inside calibrated range,
+        # Padé model outside (telephoto extrapolation).
+        if fl_min <= fl <= fl_max:
+            nz = round(float(nz_interp[qi]), 4)
+            extrapolated = False
+        elif nodal_model_dict is not None:
+            nz = round(float(predict_nodal(nodal_model_dict, np.array([fl]))[0]), 4)
+            extrapolated = True
+        else:
+            # Linear extension from boundary via PCHIP extrapolation
+            nz = round(float(nz_interp[qi]), 4)
+            extrapolated = True
+
+        cam_mtx = [
+            [cam_fx, 0.0, cam_cx],
+            [0.0, cam_fy, cam_cy],
+            [0.0, 0.0, 1.0],
+        ]
         rows.append({
-            "focal_length_mm": fl,
-            "rms":             None,
-            "fx_px":           round(cam_fx, 2),
-            "fy_px":           round(cam_fy, 2),
-            "cx_px":           round(cam_cx, 2),
-            "cy_px":           round(cam_cy, 2),
-            "dist_coeffs":     [round(v, 8) for v in dc],
-            "camera_matrix":   [[cam_fx, 0.0, cam_cx], [0.0, cam_fy, cam_cy], [0.0, 0.0, 1.0]],
-            "nodal_offset_z_mm": round(float(nz_interp[qi]), 4),
-            "interpolated":    True,
+            "focal_length_mm":   fl,
+            "rms":               None,
+            "fx_px":             round(cam_fx, 2),
+            "fy_px":             round(cam_fy, 2),
+            "cx_px":             round(cam_cx, 2),
+            "cy_px":             round(cam_cy, 2),
+            "dist_coeffs":       [round(v, 8) for v in dc],
+            "camera_matrix":     cam_mtx,
+            "nodal_offset_z_mm": nz,
+            "interpolated":      True,
+            "extrapolated":      extrapolated,
         })
 
     return rows
+
+
+def _make_objp(cols: int, rows: int, square_size_mm: float) -> np.ndarray:
+    """Build a planar (z=0) object-point array for a cols×rows inner-corner grid."""
+    pts = np.zeros((rows * cols, 3), dtype=np.float32)
+    pts[:, :2] = np.mgrid[0:cols, 0:rows].T.reshape(-1, 2) * square_size_mm
+    return pts
 
 
 def _confidence(rms: float) -> str:

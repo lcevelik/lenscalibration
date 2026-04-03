@@ -10,6 +10,8 @@ export interface ScoredFrame {
   reason: string;
   image_width: number;
   image_height: number;
+  /** Set when only a sub-region of the chart was detected (telephoto overflow). */
+  partial_grid_size?: [number, number] | null;
 }
 
 export interface CalibrationResult {
