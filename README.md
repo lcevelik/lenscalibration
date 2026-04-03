@@ -122,6 +122,21 @@ Packaged outputs go to `dist-electron/`. The backend Python files are bundled as
 3. Click **Run Zoom Calibration** — each FL is calibrated independently; nodal offsets are computed relative to the best-RMS focal length
 4. Export as `.ulens` (zoom) — produces a dense interpolated table (up to 100 rows between measured FLs via PCHIP)
 
+#### Nodal Stability With Large Charts
+
+The zoom nodal solver now uses **scale-normalized object points** before running
+`calibrateCamera` / `solvePnP`, then converts translation back to millimetres.
+This improves numerical conditioning when chart dimensions are very large
+(telephoto workflows, large stage boards) while preserving physical nodal units.
+
+In practice this means:
+- Better nodal stability at long focal lengths when only partial-board frames are available
+- Less sensitivity to chart size magnitude during optimization
+- Same exported nodal units (`mm`) and same `.ulens` nodal interpretation
+
+This follows the same high-level approach as Unreal's nodal pipeline (PnP + reprojection
+optimization) with an additional conditioning step for robustness across board scales.
+
 ### File import
 
 Drag and drop JPEG/PNG images onto the **Drop Zone** panel to use still images instead of live capture.
@@ -144,6 +159,10 @@ CameraCalibration plugin `SphericalLensModel` format. Static lens with `ZoomEnco
 
 ### UE5 .ulens (zoom sweep)
 Multi-entry zoom table. `ZoomEncoder` is normalised `[0, 1]` across the captured FL range. `NodalOffset Tz` carries the optical-centre Z-shift in mm (OpenCV coordinates, relative to best-RMS FL). When interpolated rows are included, UE5 gets a fine-grained table that avoids linear-interpolation artefacts across large FL gaps.
+
+If focal-length groups were captured at different physical camera-to-chart distances,
+provide `working_distance_mm` per group so nodal offsets are expressed in a consistent
+body-fixed reference frame.
 
 ---
 
