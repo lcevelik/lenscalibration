@@ -6,6 +6,7 @@ const STREAM_W         = 640;
 const STREAM_H         = 360;
 const MIN_FRAMES_PER_FL = 5;
 const AUTO_STOP_MIN_FRAMES = 12;
+const MANUAL_ONLY_CAPTURE = true;
 const SNAP_FLS = [18, 24, 28, 35, 50, 70, 85, 100, 135, 150, 200];
 
 // ---------------------------------------------------------------------------
@@ -111,6 +112,63 @@ function fmtFps(fps: number): string {
   // Use tolerance instead of exact modulo to handle floats like 29.9999…
   const rounded = Math.round(fps);
   return Math.abs(fps - rounded) < 0.01 ? String(rounded) : fps.toFixed(2).replace(/\.?0+$/, '');
+}
+
+type DiversityStats = {
+  score: number;
+  level: 'poor' | 'fair' | 'good';
+  sampleCount: number;
+  centerSpread: number;
+  tiltSpreadDeg: number;
+  coverageSpread: number;
+};
+
+function computeFrameDiversity(frames: ScoredFrame[]): DiversityStats | null {
+  const usable = frames.filter(f => f.quality !== 'fail' && f.corners.length > 0);
+  if (usable.length < 3) return null;
+
+  const centers = usable.map(f => {
+    const xs = f.corners.map(c => c[0]);
+    const ys = f.corners.map(c => c[1]);
+    const cx = xs.reduce((a, b) => a + b, 0) / xs.length;
+    const cy = ys.reduce((a, b) => a + b, 0) / ys.length;
+    const w = Math.max(1, f.image_width || 1);
+    const h = Math.max(1, f.image_height || 1);
+    return [cx / w, cy / h] as const;
+  });
+
+  const centerXs = centers.map(c => c[0]);
+  const centerYs = centers.map(c => c[1]);
+  const spreadX = Math.max(...centerXs) - Math.min(...centerXs);
+  const spreadY = Math.max(...centerYs) - Math.min(...centerYs);
+  const centerSpread = Math.hypot(spreadX, spreadY);
+
+  const angleVals = usable
+    .map(f => f.angle)
+    .filter((a): a is number => typeof a === 'number')
+    .map(a => Math.abs(a));
+  const tiltSpreadDeg = angleVals.length >= 2 ? Math.max(...angleVals) - Math.min(...angleVals) : 0;
+
+  const coverageVals = usable.map(f => Number.isFinite(f.coverage) ? f.coverage : 0);
+  const coverageSpread = coverageVals.length >= 2 ? Math.max(...coverageVals) - Math.min(...coverageVals) : 0;
+
+  const centerScore = Math.min(1, centerSpread / 0.35);
+  const tiltScore = Math.min(1, tiltSpreadDeg / 12.0);
+  const coverageScore = Math.min(1, coverageSpread / 0.08);
+  const score = Math.round(100 * (0.55 * centerScore + 0.25 * tiltScore + 0.20 * coverageScore));
+
+  let level: DiversityStats['level'] = 'poor';
+  if (score >= 70) level = 'good';
+  else if (score >= 45) level = 'fair';
+
+  return {
+    score,
+    level,
+    sampleCount: usable.length,
+    centerSpread,
+    tiltSpreadDeg,
+    coverageSpread,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -265,6 +323,8 @@ export default function GuidedCapture({ ws, boardSettings, onCalibrationSent, on
             flashTimer.current = setTimeout(() => setFlash(false), 500);
           }
           if (
+            !MANUAL_ONLY_CAPTURE
+            &&
             msg.complete
             && (msg.frame_count ?? 0) >= AUTO_STOP_MIN_FRAMES
             && !autoStopRequestedRef.current
@@ -480,6 +540,12 @@ export default function GuidedCapture({ ws, boardSettings, onCalibrationSent, on
     setActiveFlIdx(null);
   };
 
+  const setFlWorkingDistance = (fl_mm: number, value: string) => {
+    const parsed = parseFloat(value);
+    const nextMm = Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+    setFlGroups(prev => prev.map(g => (g.fl_mm === fl_mm ? { ...g, working_distance_mm: nextMm } : g)));
+  };
+
   const startCapture = () => {
     if (running || !ws || ws.readyState !== WebSocket.OPEN || selectedIdx === null) return;
     if (activeFlIdx === null) return;
@@ -495,6 +561,7 @@ export default function GuidedCapture({ ws, boardSettings, onCalibrationSent, on
       save_dir: saveDir,
       focal_length_mm: flGroups[activeFlIdx].fl_mm,
       fixed_mount: fixedMount,
+      manual_only: MANUAL_ONLY_CAPTURE,
       lens_type: lensSettings.lensType,
       squeeze_ratio: lensSettings.squeezeRatio,
     }));
@@ -591,6 +658,8 @@ export default function GuidedCapture({ ws, boardSettings, onCalibrationSent, on
   const canCalibrateZ    = !running && !calibratingZoom && readyFlCount >= 2;
 
   const nextPendingFlIdx = flGroups.findIndex((g, i) => activeFlIdx !== null && i > activeFlIdx && g.status !== 'done');
+  const activeFlFrames = activeFlIdx !== null ? (flGroups[activeFlIdx]?.frames ?? []) : [];
+  const activeFlDiversity = computeFrameDiversity(activeFlFrames);
 
   // Current FL context label
   const currentFl = activeFlIdx !== null ? flGroups[activeFlIdx]?.fl_mm : null;
@@ -1009,6 +1078,24 @@ export default function GuidedCapture({ ws, boardSettings, onCalibrationSent, on
                         {g.status === 'pending' && !isActive && <span className="text-[10px] text-slate-600">pending</span>}
                         {isActive && !running && g.status !== 'done' && <span className="text-[10px] text-blue-400">ready to capture</span>}
                         {isCapturing && <span className="text-[10px] text-blue-400">capturing…</span>}
+                        <div className="mt-1 flex items-center gap-1.5">
+                          <label className="text-[10px] text-slate-500" htmlFor={`wd-${g.fl_mm}`}>WD</label>
+                          <input
+                            id={`wd-${g.fl_mm}`}
+                            type="number"
+                            min={0}
+                            step="10"
+                            inputMode="decimal"
+                            value={g.working_distance_mm > 0 ? String(g.working_distance_mm) : ''}
+                            placeholder="mm"
+                            disabled={running}
+                            onClick={e => e.stopPropagation()}
+                            onChange={e => setFlWorkingDistance(g.fl_mm, e.target.value)}
+                            className="w-20 rounded border border-slate-600 bg-slate-900 px-1.5 py-0.5 text-[10px] text-slate-200 placeholder:text-slate-600 focus:border-blue-500 focus:outline-none disabled:opacity-60"
+                            title="Camera-to-chart working distance in mm for this focal-length group"
+                          />
+                          <span className="text-[10px] text-slate-600">mm</span>
+                        </div>
                       </div>
                       {!running && (
                         <button type="button" onClick={e => { e.stopPropagation(); removeFl(g.fl_mm); }}
@@ -1041,6 +1128,31 @@ export default function GuidedCapture({ ws, boardSettings, onCalibrationSent, on
                       className="flex-1 px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-sm font-medium transition-colors">Capture</button>
                     <button type="button" onClick={stopCapture}
                       className="flex-1 px-3 py-2 bg-red-600/80 hover:bg-red-600 text-white rounded-lg text-sm font-medium transition-colors">Stop</button>
+                  </div>
+                )}
+
+                {activeFlDiversity && (
+                  <div className={`rounded-lg border px-2.5 py-2 text-[10px] ${
+                    activeFlDiversity.level === 'good'
+                      ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+                      : activeFlDiversity.level === 'fair'
+                        ? 'border-yellow-500/40 bg-yellow-500/10 text-yellow-300'
+                        : 'border-red-500/40 bg-red-500/10 text-red-300'
+                  }`}>
+                    <div className="flex items-center justify-between">
+                      <span className="font-semibold uppercase tracking-wider">Capture Diversity</span>
+                      <span className="font-mono tabular-nums">{activeFlDiversity.score}/100</span>
+                    </div>
+                    <div className="mt-1 grid grid-cols-3 gap-2 text-[9px] text-slate-300">
+                      <span>Center Δ {activeFlDiversity.centerSpread.toFixed(2)}</span>
+                      <span>Tilt Δ {activeFlDiversity.tiltSpreadDeg.toFixed(1)}°</span>
+                      <span>Scale Δ {activeFlDiversity.coverageSpread.toFixed(3)}</span>
+                    </div>
+                    {activeFlDiversity.level !== 'good' && (
+                      <p className="mt-1 text-[9px] text-slate-300">
+                        Add more varied frames: left/right + high/low + stronger tilt at this FL.
+                      </p>
+                    )}
                   </div>
                 )}
               </div>

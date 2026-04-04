@@ -243,11 +243,24 @@ def run_calibration(
                 squeeze_ratio,
             )
 
-    if not np.isfinite(rms) or rms > 5.0:
+    if not np.isfinite(rms):
         return _error(
             f"Calibration RMS too high ({rms:.2f}px). Data is inconsistent for this board/profile.",
             squeeze_ratio,
         )
+
+    if rms > 5.0:
+        if sparse_mode:
+            relax_msg = (
+                f"High RMS ({rms:.2f}px) in sparse tele mode. "
+                "Returned a low-confidence fit for continuity; distortion is likely unreliable."
+            )
+            solver_warning = f"{solver_warning} {relax_msg}" if solver_warning else relax_msg
+        else:
+            return _error(
+                f"Calibration RMS too high ({rms:.2f}px). Data is inconsistent for this board/profile.",
+                squeeze_ratio,
+            )
 
     # --- FOV ----------------------------------------------------------------
     aperture_w, aperture_h = 1.0, 1.0  # sensor size unknown; use 1mm as neutral

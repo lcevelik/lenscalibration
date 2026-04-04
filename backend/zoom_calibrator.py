@@ -350,7 +350,7 @@ def run_zoom_calibration(
                 optical_centers.append(pose_result.get("_mean_center"))
                 continue
 
-        if (not np.isfinite(rms)) or (rms > 5.0):
+        if not np.isfinite(rms):
             fl_results.append({
                 "focal_length_mm": fl_mm,
                 "rms": None,
@@ -366,6 +366,30 @@ def run_zoom_calibration(
             })
             optical_centers.append(None)
             continue
+
+        if rms > 5.0:
+            if sparse_mode:
+                relax_msg = (
+                    f"High RMS ({float(rms):.2f}px) in sparse tele mode. "
+                    "Kept low-confidence fit for continuity; distortion is likely unreliable."
+                )
+                solve_warning = f"{solve_warning} {relax_msg}" if solve_warning else relax_msg
+            else:
+                fl_results.append({
+                    "focal_length_mm": fl_mm,
+                    "rms": None,
+                    "error": f"RMS too high ({float(rms):.2f}px) for this FL. Likely board/profile mismatch.",
+                })
+                pending_nodal.append({
+                    "index": len(fl_results) - 1,
+                    "obj_points": obj_points,
+                    "img_points": img_points,
+                    "paths": paths,
+                    "focal_length_mm": fl_mm,
+                    "detection_type": selected_det,
+                })
+                optical_centers.append(None)
+                continue
 
         fx_px = float(cam_mtx[0, 0])
         fy_px = float(cam_mtx[1, 1])

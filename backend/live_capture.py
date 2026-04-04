@@ -224,6 +224,7 @@ async def run_live_capture(
     board_rows = int(config.get("board_rows", 6))
     save_dir   = config.get("save_dir", "captures")
     focal_length_mm = float(config.get("focal_length_mm", 0.0) or 0.0)
+    manual_only = bool(config.get("manual_only", False))
     checkerboard_size = (board_cols, board_rows)
     fixed_mount    = bool(config.get("fixed_mount", False))
     required_poses = get_required_poses(focal_length_mm or None, fixed_mount=fixed_mount)
@@ -392,7 +393,7 @@ async def run_live_capture(
                     hold_start   = None
                     hold_miss    = 0
 
-            do_capture = force or (hold_progress >= 1.0 and matching_pose is not None)
+            do_capture = force or ((not manual_only) and hold_progress >= 1.0 and matching_pose is not None)
 
             if do_capture:
                 # Use nanosecond timestamp to avoid collisions when two captures
