@@ -122,8 +122,6 @@ export default function DropZone({ ws, boardSettings, onBoardChange, onScoringDo
     }
   };
 
-  const spinnerPct = progress.total > 0 ? (progress.done / progress.total) * 100 : 0;
-
   return (
     <div className="space-y-3">
       <BoardPresetSelector
@@ -153,12 +151,11 @@ export default function DropZone({ ws, boardSettings, onBoardChange, onScoringDo
             <p className="text-sm text-slate-300">
               Scoring {progress.done} / {progress.total} frames…
             </p>
-            <div className="w-48 h-1.5 bg-slate-700 rounded-full overflow-hidden">
-              <div
-                className="h-full bg-blue-500 rounded-full transition-all"
-                style={{ width: `${spinnerPct}%` }}
-              />
-            </div>
+            <progress
+              className="dropzone-progress-bar"
+              value={progress.done}
+              max={progress.total}
+            />
           </>
         ) : (
           <>
