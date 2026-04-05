@@ -280,28 +280,23 @@ export default function FileCalibration({
           )}
         </div>
 
-        {/* Preset row */}
-        <div className="flex flex-wrap gap-2">
-          {SENSOR_PRESETS.map(p => {
-            const active =
-              cameraSettings.sensorWidthMm === String(p.w) &&
-              cameraSettings.sensorHeightMm === String(p.h);
-            return (
-              <button
-                key={p.label}
-                onClick={() => onCameraSettingsChange({ ...cameraSettings, sensorWidthMm: String(p.w), sensorHeightMm: String(p.h) })}
-                disabled={busy}
-                className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${
-                  active
-                    ? 'bg-blue-600/30 border-blue-500/60 text-blue-300'
-                    : 'bg-slate-700 border-slate-600 text-slate-400 hover:text-slate-200 hover:border-slate-500'
-                }`}
-              >
-                {p.label}
-              </button>
-            );
-          })}
-        </div>
+        {/* Preset dropdown */}
+        <select
+          disabled={busy}
+          value={SENSOR_PRESETS.find(
+            p => cameraSettings.sensorWidthMm === String(p.w) && cameraSettings.sensorHeightMm === String(p.h)
+          )?.label ?? ''}
+          onChange={e => {
+            const p = SENSOR_PRESETS.find(p => p.label === e.target.value);
+            if (p) onCameraSettingsChange({ ...cameraSettings, sensorWidthMm: String(p.w), sensorHeightMm: String(p.h) });
+          }}
+          className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500 disabled:opacity-50"
+        >
+          <option value="" disabled>Select camera preset…</option>
+          {SENSOR_PRESETS.map(p => (
+            <option key={p.label} value={p.label}>{p.label}</option>
+          ))}
+        </select>
 
         {/* Manual inputs row */}
         <div className="flex flex-wrap items-center gap-3">

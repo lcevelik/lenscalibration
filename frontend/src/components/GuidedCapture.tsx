@@ -5,6 +5,16 @@ import PoseDiagram from './PoseDiagram';
 const STREAM_W         = 640;
 const STREAM_H         = 360;
 const MIN_FRAMES_PER_FL = 5;
+
+const SENSOR_PRESETS = [
+  { label: 'Venice — FF 6K (36.0 × 24.0)',                 w: 36.0,  h: 24.0  },
+  { label: 'Venice 2 / Burano — FF 8K (35.9 × 24.0)',      w: 35.9,  h: 24.0  },
+  { label: 'Venice 2 / Burano — S35 (26.2 × 14.7)',        w: 26.2,  h: 14.7  },
+  { label: 'Venice 2 / Burano — S16 (14.6 × 8.2)',         w: 14.6,  h: 8.2   },
+  { label: 'HDC-series 2/3" HD B4 (9.59 × 5.39)',          w: 9.59,  h: 5.39  },
+  { label: 'HDC-F5500 / HDC-3500 4K 2/3" (9.59 × 5.39)',   w: 9.59,  h: 5.39  },
+  { label: 'HDC-5500 / HDW-series 2/3" (9.59 × 5.39)',     w: 9.59,  h: 5.39  },
+];
 const AUTO_STOP_MIN_FRAMES = 12;
 const MANUAL_ONLY_CAPTURE = true;
 const SNAP_FLS = [18, 24, 28, 35, 50, 70, 85, 100, 135, 150, 200];
@@ -87,6 +97,7 @@ interface Props {
   lensSettings: LensSettings;
   onLensChange: (s: LensSettings) => void;
   cameraSettings: CameraSettings;
+  onCameraSettingsChange: (s: CameraSettings) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -197,7 +208,7 @@ function HoldRing({ progress }: { progress: number }) {
 // Component
 // ---------------------------------------------------------------------------
 
-export default function GuidedCapture({ ws, boardSettings, onCalibrationSent, onZoomCalibrationComplete, selectedIdx, selectedDeviceName, detectedW, detectedH, detectedFps, lensSettings, cameraSettings }: Props) {
+export default function GuidedCapture({ ws, boardSettings, onCalibrationSent, onZoomCalibrationComplete, selectedIdx, selectedDeviceName, detectedW, detectedH, detectedFps, lensSettings, onLensChange, cameraSettings, onCameraSettingsChange }: Props) {
   // ── Preview ───────────────────────────────────────────────────────────────
   const [previewFrame, setPreviewFrame] = useState<string | null>(null);
   const [previewing, setPreviewing]   = useState(false);
@@ -729,6 +740,50 @@ export default function GuidedCapture({ ws, boardSettings, onCalibrationSent, on
               </>
             )}
           </div>
+        </div>
+      </div>
+
+      {/* ── Camera / Sensor ─────────────────────────────────────────── */}
+      <div className="rounded-xl bg-slate-800 border border-slate-700 p-4 space-y-3">
+        <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Camera / Sensor</h2>
+        <select
+          aria-label="Camera sensor preset"
+          disabled={running}
+          value={SENSOR_PRESETS.find(
+            p => cameraSettings.sensorWidthMm === String(p.w) && cameraSettings.sensorHeightMm === String(p.h)
+          )?.label ?? ''}
+          onChange={e => {
+            const p = SENSOR_PRESETS.find(p => p.label === e.target.value);
+            if (p) onCameraSettingsChange({ ...cameraSettings, sensorWidthMm: String(p.w), sensorHeightMm: String(p.h) });
+          }}
+          className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500 disabled:opacity-50"
+        >
+          <option value="" disabled>Select camera preset…</option>
+          {SENSOR_PRESETS.map(p => (
+            <option key={p.label} value={p.label}>{p.label}</option>
+          ))}
+        </select>
+        <div className="flex flex-wrap items-center gap-3">
+          <label className="flex items-center gap-1.5">
+            <span className="text-xs text-slate-400 shrink-0">Sensor W</span>
+            <input type="number" min={1} max={200} step={0.01}
+              disabled={running}
+              value={cameraSettings.sensorWidthMm}
+              onChange={e => onCameraSettingsChange({ ...cameraSettings, sensorWidthMm: e.target.value })}
+              placeholder="36.0"
+              className="w-20 px-2 py-1 rounded-md border border-slate-600 text-sm text-slate-200 bg-slate-700 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50" />
+            <span className="text-xs text-slate-500">mm</span>
+          </label>
+          <label className="flex items-center gap-1.5">
+            <span className="text-xs text-slate-400 shrink-0">Sensor H</span>
+            <input type="number" min={1} max={200} step={0.01}
+              disabled={running}
+              value={cameraSettings.sensorHeightMm}
+              onChange={e => onCameraSettingsChange({ ...cameraSettings, sensorHeightMm: e.target.value })}
+              placeholder="24.0"
+              className="w-20 px-2 py-1 rounded-md border border-slate-600 text-sm text-slate-200 bg-slate-700 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50" />
+            <span className="text-xs text-slate-500">mm</span>
+          </label>
         </div>
       </div>
 

@@ -22,7 +22,9 @@ export default function FrameGrid({ frames, excluded, onToggle, backendPort }: P
 
   const included = frames.filter(f => !excluded.has(f.path));
   const thumbUrl = (path: string) =>
-    `http://127.0.0.1:${backendPort}/thumbnail?path=${encodeURIComponent(path)}&width=240`;
+    import.meta.env.DEV
+      ? `/thumbnail?path=${encodeURIComponent(path)}&width=240`
+      : `http://127.0.0.1:${backendPort}/thumbnail?path=${encodeURIComponent(path)}&width=240`;
 
   return (
     <div className="space-y-2">

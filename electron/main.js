@@ -96,7 +96,7 @@ function stopBackend() {
 }
 
 async function createWindow() {
-  backendPort = await getAvailablePort();
+  backendPort = app.isPackaged ? await getAvailablePort() : 8765;
   await startBackend(backendPort);
 
   const win = new BrowserWindow({

@@ -30,6 +30,18 @@ from typing import Optional
 import cv2
 
 # ---------------------------------------------------------------------------
+# Non-video device exclusion — names matching this pattern are dropped
+# ---------------------------------------------------------------------------
+
+_EXCLUDE_VIDEO: re.Pattern = re.compile(
+    r'microphone|headset|headphone|speaker|audio|midi|line\s*in|stereo\s*mix'
+    r'|virtual\s*audio|wave\s*out|wave\s*in|realtek\s*hd|hdmi\s*audio'
+    r'|scanner|flatbed|document\s*feeder|twain'
+    r'|obs[- ]virtual|snap\s*camera|manycam|xsplit|iriun|droidcam',
+    re.I,
+)
+
+# ---------------------------------------------------------------------------
 # Brand detection table
 # ---------------------------------------------------------------------------
 
@@ -112,7 +124,7 @@ def _enum_powershell() -> list[str] | None:
     try:
         ps = (
             "Get-PnpDevice -PresentOnly | "
-            "Where-Object {$_.Class -in @('Camera','Image','Media')} | "
+            "Where-Object {$_.Class -in @('Camera','Media')} | "
             "Select-Object -ExpandProperty FriendlyName | ConvertTo-Json -Compress"
         )
         result = subprocess.run(
@@ -168,6 +180,8 @@ def enumerate_capture_devices() -> list[dict]:
 
     if names:
         for idx, name in enumerate(names):
+            if _EXCLUDE_VIDEO.search(name):
+                continue
             devices.append({
                 'index': idx,
                 'name': name,

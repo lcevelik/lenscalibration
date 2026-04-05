@@ -326,7 +326,11 @@ export default function App() {
       }
       if (cancelled) return;
       setConnStatus('connecting');
-      socket = new WebSocket(`ws://127.0.0.1:${wsPortRef.current}/ws`);
+      socket = new WebSocket(
+        import.meta.env.DEV
+          ? `ws://${window.location.host}/ws`
+          : `ws://127.0.0.1:${wsPortRef.current}/ws`
+      );
 
       socket.onopen = () => {
         attempt = 0;
@@ -581,6 +585,7 @@ export default function App() {
             lensSettings={lensSettings}
             onLensChange={setLensSettings}
             cameraSettings={cameraSettings}
+            onCameraSettingsChange={setCameraSettings}
           />
         )}
 
@@ -681,39 +686,9 @@ export default function App() {
               )}
             </div>
 
-            {/* Camera / Sensor */}
+            {/* Lens */}
             <div className="rounded-xl bg-slate-800 border border-slate-700 p-5 space-y-4">
-              <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">Camera / Sensor</h2>
-
-              <div className="flex flex-col gap-1">
-                <span className="text-xs text-slate-400">Camera preset</span>
-                <select defaultValue=""
-                  onChange={e => {
-                    const p = SENSOR_PRESETS.find(p => p.label === e.target.value);
-                    if (p) setCameraSettings(s => ({ ...s, sensorWidthMm: String(p.w), sensorHeightMm: String(p.h) }));
-                  }}
-                  className="bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500 w-full">
-                  <option value="" disabled>Select camera…</option>
-                  {SENSOR_PRESETS.map(p => <option key={p.label} value={p.label}>{p.label}</option>)}
-                </select>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <label className="flex flex-col gap-1">
-                  <span className="text-xs text-slate-400">Sensor width (mm)</span>
-                  <input type="number" value={cameraSettings.sensorWidthMm}
-                    onChange={e => setCameraSettings(s => ({ ...s, sensorWidthMm: e.target.value }))}
-                    placeholder="36.0"
-                    className="bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500" />
-                </label>
-                <label className="flex flex-col gap-1">
-                  <span className="text-xs text-slate-400">Sensor height (mm)</span>
-                  <input type="number" value={cameraSettings.sensorHeightMm}
-                    onChange={e => setCameraSettings(s => ({ ...s, sensorHeightMm: e.target.value }))}
-                    placeholder="24.0"
-                    className="bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500" />
-                </label>
-              </div>
+              <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">Lens</h2>
 
               <label className="flex flex-col gap-1">
                 <span className="text-xs text-slate-400">Lens name</span>
