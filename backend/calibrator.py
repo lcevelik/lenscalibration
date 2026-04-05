@@ -70,7 +70,11 @@ def _is_implausible_solution(camera_matrix: np.ndarray, dist_coeffs: np.ndarray,
         return True
     if fx > 20.0 * w or fy > 20.0 * h:
         return True
-    if abs(cx) > 3.0 * w or abs(cy) > 3.0 * h:
+    # Principal point must lie within ±75 % of the image half-dimension from
+    # the image centre.  Testing against absolute pixel values (old check:
+    # abs(cx) > 3*w) measures from the top-left corner and misses cases like
+    # cy = -314 for a 1080 px tall frame.
+    if abs(cx - w / 2) > 0.75 * w or abs(cy - h / 2) > 0.75 * h:
         return True
     if abs(k1) > 2.0 or abs(k2) > 2.0:
         return True
@@ -157,13 +161,15 @@ def run_calibration(
 
     # Use one detection model per solve. Mixing checkerboard and aruco-grid
     # frames in one calibration causes inconsistent board coordinates.
+    # Select the detection type with the most usable frames (minimum 3).
+    # This ensures that on ChArUco boards (e.g. Sony AcuTarget), where ArUco
+    # detection succeeds on more frames than the checkerboard detector, we use
+    # the larger frame set even if checkerboard technically passed the minimum.
     det_counter = Counter((f.get("detection_type") or "checkerboard") for f in usable)
-    selected_det = None
-    for det_name in ("checkerboard", "aruco_grid", "charuco"):
-        if det_counter.get(det_name, 0) >= 3:
-            selected_det = det_name
-            break
-    if selected_det is None:
+    qualified = [d for d in det_counter if det_counter[d] >= 3]
+    if qualified:
+        selected_det = max(qualified, key=lambda d: det_counter[d])
+    else:
         selected_det = det_counter.most_common(1)[0][0]
     usable = [f for f in usable if (f.get("detection_type") or "checkerboard") == selected_det]
 
@@ -185,10 +191,12 @@ def run_calibration(
             obj = np.array(frame_obj_points, dtype=np.float32).reshape(-1, 3)
             if obj.shape[0] != corners.shape[0] or obj.shape[0] < 6:
                 continue
-            if (frame.get("detection_type") or "") == "aruco_grid":
-                # frame_scorer uses board units where one square = 1.0;
-                # convert to mm so translation/nodal scale is meaningful.
+            if (frame.get("detection_type") or "") == "charuco":
+                # ChArUco obj points come back in board-square units (1 = 1 square)
+                # from OpenCV's getChessboardCorners(); scale to mm.
                 obj = obj * float(square_size_mm)
+            # aruco_grid obj points are already in mm (physical mm from the
+            # Sony board lookup table), so no further scaling is needed.
             sparse_mode = True
         elif partial_size:
             p_cols, p_rows = int(partial_size[0]), int(partial_size[1])
@@ -251,6 +259,14 @@ def run_calibration(
 
     if rms > 5.0:
         if sparse_mode:
+            if rms > 20.0:
+                return _error(
+                    f"Calibration RMS too high ({rms:.2f}px) even for sparse ArUco mode. "
+                    "ArUco marker points are too inconsistent — capture more frames with the board "
+                    "at varied angles/positions covering more of the frame, and ensure the target "
+                    "is sharp and well-lit.",
+                    squeeze_ratio,
+                )
             relax_msg = (
                 f"High RMS ({rms:.2f}px) in sparse tele mode. "
                 "Returned a low-confidence fit for continuity; distortion is likely unreliable."
@@ -302,7 +318,7 @@ def run_calibration(
             pass
 
     # --- Confidence ---------------------------------------------------------
-    confidence = _confidence(rms)
+    confidence = _confidence(rms, sparse=sparse_mode)
 
     return {
         "rms": round(rms, 4),
@@ -332,14 +348,17 @@ def _make_objp(cols: int, rows: int, square_size_mm: float) -> np.ndarray:
     return pts
 
 
-def _confidence(rms: float) -> str:
-    if rms < 0.3:
-        return "excellent"
-    if rms < 0.5:
-        return "good"
-    if rms < 1.0:
-        return "marginal"
-    return "poor"
+def _confidence(rms: float, sparse: bool = False) -> str:
+    if sparse:
+        if rms < 0.7:  return "excellent"
+        if rms < 1.5:  return "good"
+        if rms < 3.0:  return "marginal"
+        return "poor"
+    else:
+        if rms < 0.3:  return "excellent"
+        if rms < 0.5:  return "good"
+        if rms < 1.0:  return "marginal"
+        return "poor"
 
 
 def _error(reason: str, squeeze_ratio: float = 1.0) -> dict:

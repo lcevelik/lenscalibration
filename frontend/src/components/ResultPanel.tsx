@@ -39,18 +39,21 @@ interface SensorPreset {
 }
 
 const SENSOR_PRESETS: SensorPreset[] = [
-  // Sony Venice (CineAlta)
-  { group: 'Sony Venice',         label: 'Venice — FF 6K (36.0 × 24.0)',      w: 36.0,  h: 24.0  },
-  { group: 'Sony Venice',         label: 'Venice — S35 4K (26.2 × 13.8)',      w: 26.2,  h: 13.8  },
+  // Sony Venice
+  { group: 'Sony Venice',         label: 'Venice — FF 6K (36.0 × 24.0)',                w: 36.0,  h: 24.0  },
   // Sony Venice 2
-  { group: 'Sony Venice 2',       label: 'Venice 2 — FF 8K (35.9 × 24.0)',     w: 35.9,  h: 24.0  },
-  { group: 'Sony Venice 2',       label: 'Venice 2 — FF 6K (36.0 × 24.0)',     w: 36.0,  h: 24.0  },
-  { group: 'Sony Venice 2',       label: 'Venice 2 — S35 6K (26.2 × 14.7)',    w: 26.2,  h: 14.7  },
-  { group: 'Sony Venice 2',       label: 'Venice 2 — S16 (14.6 × 8.2)',        w: 14.6,  h: 8.2   },
+  { group: 'Sony Venice 2',       label: 'Venice 2 — FF 8K (35.9 × 24.0)',              w: 35.9,  h: 24.0  },
+  { group: 'Sony Venice 2',       label: 'Venice 2 — FF 6K (36.0 × 24.0)',              w: 36.0,  h: 24.0  },
+  { group: 'Sony Venice 2',       label: 'Venice 2 — S35 6K (26.2 × 14.7)',             w: 26.2,  h: 14.7  },
+  { group: 'Sony Venice 2',       label: 'Venice 2 — S16 (14.6 × 8.2)',                 w: 14.6,  h: 8.2   },
   // Sony Burano
-  { group: 'Sony Burano',         label: 'Burano — FF 8K (35.9 × 24.0)',       w: 35.9,  h: 24.0  },
-  { group: 'Sony Burano',         label: 'Burano — S35 (26.2 × 14.7)',         w: 26.2,  h: 14.7  },
-  { group: 'Sony Burano',         label: 'Burano — S16 (14.6 × 8.2)',          w: 14.6,  h: 8.2   },
+  { group: 'Sony Burano',         label: 'Burano — FF 8K (35.9 × 24.0)',               w: 35.9,  h: 24.0  },
+  { group: 'Sony Burano',         label: 'Burano — S35 (26.2 × 14.7)',                  w: 26.2,  h: 14.7  },
+  { group: 'Sony Burano',         label: 'Burano — S16 (14.6 × 8.2)',                   w: 14.6,  h: 8.2   },
+  // Sony Broadcast B4
+  { group: 'Sony Broadcast B4',   label: 'HDC-series 2/3" HD B4 (9.59 × 5.39)',        w: 9.59,  h: 5.39  },
+  { group: 'Sony Broadcast B4',   label: 'HDC-F5500 / HDC-3500 4K 2/3" (9.59 × 5.39)', w: 9.59,  h: 5.39  },
+  { group: 'Sony Broadcast B4',   label: 'HDC-5500 / HDW-series 2/3" (9.59 × 5.39)',   w: 9.59,  h: 5.39  },
 ];
 
 const DC_NAMES_5  = ['k1', 'k2', 'p1', 'p2', 'k3'];

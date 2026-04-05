@@ -17,6 +17,7 @@ from typing import Optional
 
 import cv2
 import numpy as np
+from scipy.interpolate import PchipInterpolator
 
 # OpenEXR is optional — export_stmap_exr will return an error if missing
 try:
@@ -24,6 +25,133 @@ try:
     _HAS_EXR = True
 except ImportError:
     _HAS_EXR = False
+
+
+# ---------------------------------------------------------------------------
+# Nodal preset helpers (shared by CLI export_lens.py and the app exporter)
+# ---------------------------------------------------------------------------
+
+_PRESETS_DEFAULT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nodal_presets.json")
+
+
+def load_nodal_presets(path: str = _PRESETS_DEFAULT) -> dict[str, dict]:
+    """Load nodal_presets.json → {name: {description, points, focal_lengths_mm?, ...}}."""
+    if not os.path.isfile(path):
+        return {}
+    with open(path, encoding="utf-8") as fh:
+        raw = json.load(fh)
+    out: dict[str, dict] = {}
+    for key, val in raw.items():
+        if key.startswith("_"):
+            continue
+        out[key] = val if isinstance(val, dict) else {"points": val}
+    return out
+
+
+def apply_nodal_preset(
+    preset_name: str,
+    fl_results: list[dict],
+    fl_interpolated: list[dict] | None,
+    nodal_offsets_mm: dict,
+    presets: dict[str, dict] | None = None,
+) -> None:
+    """
+    Override nodal offsets in-place using a manufacturer preset.
+    Reference FL (longest calibrated) is set to Tz=0; all others are relative.
+    """
+    if presets is None:
+        presets = load_nodal_presets()
+    preset = presets.get(preset_name)
+    if preset is None:
+        print(f"[warn] Unknown nodal preset '{preset_name}'. Available: {list(presets)}")
+        return
+
+    raw_points = preset.get("points", preset) if isinstance(preset, dict) else preset
+    preset_fl  = np.array([p[0] for p in raw_points], dtype=float)
+    preset_abs = np.array([p[1] for p in raw_points], dtype=float)
+    interp = PchipInterpolator(preset_fl, preset_abs, extrapolate=True)
+
+    cal_fls = sorted([r["focal_length_mm"] for r in fl_results if r.get("rms") is not None])
+    if not cal_fls:
+        print("[warn] No valid calibrated FLs found; skipping nodal preset.")
+        return
+    ref_fl  = max(cal_fls)
+    ref_abs = float(interp(ref_fl))
+
+    def tz(fl_mm: float) -> float:
+        return round(float(interp(fl_mm)) - ref_abs, 4)
+
+    nodal_offsets_mm.clear()
+    for r in fl_results:
+        fl  = r["focal_length_mm"]
+        key = str(int(fl)) if fl == int(fl) else f"{fl:.1f}"
+        nodal_offsets_mm[key] = tz(fl)
+
+    if fl_interpolated:
+        for r in fl_interpolated:
+            r["nodal_offset_z_mm"] = tz(r["focal_length_mm"])
+
+    print(f"[nodal preset] '{preset_name}' applied (ref={ref_fl:.0f}mm, ref_abs={ref_abs:.1f}mm from flange)")
+    for fl in sorted(cal_fls):
+        print(f"  {fl:.0f}mm -> Tz={tz(fl):+.2f}mm  (abs={float(interp(fl)):.1f}mm from flange)")
+
+
+def apply_fl_override(
+    preset_name: str,
+    fl_results: list[dict],
+    fl_interpolated: list[dict] | None,
+    sensor_width_mm: float,
+    image_width_px: int,
+    presets: dict[str, dict] | None = None,
+) -> None:
+    """
+    Override calibrated fx_px using manufacturer focal lengths in the preset's
+    'focal_lengths_mm' table: [[zoom_ring_mm, actual_fl_mm], ...].
+    Patches both fx_px/fy_px and camera_matrix[0,0]/[1,1].
+    """
+    if presets is None:
+        presets = load_nodal_presets()
+    preset = presets.get(preset_name)
+    if preset is None:
+        return
+
+    fl_points = preset.get("focal_lengths_mm") if isinstance(preset, dict) else None
+    if not fl_points:
+        return
+    if sensor_width_mm <= 0:
+        print("[warn] sensor_width_mm not set; skipping FL override.")
+        return
+
+    pfl_zoom = np.array([p[0] for p in fl_points], dtype=float)
+    pfl_fl   = np.array([p[1] for p in fl_points], dtype=float)
+    fl_interp = PchipInterpolator(pfl_zoom, pfl_fl, extrapolate=True)
+
+    def _new_fx(zoom_mm: float) -> float:
+        return float(fl_interp(zoom_mm)) * image_width_px / sensor_width_mm
+
+    for r in fl_results:
+        if r.get("rms") is None:
+            continue
+        new_fx = _new_fx(r["focal_length_mm"])
+        r["fx_px"] = new_fx
+        r["fy_px"] = new_fx
+        if "camera_matrix" in r:
+            cm = np.array(r["camera_matrix"], dtype=np.float64)
+            cm[0, 0] = new_fx
+            cm[1, 1] = new_fx
+            r["camera_matrix"] = cm.tolist()
+
+    if fl_interpolated:
+        for r in fl_interpolated:
+            new_fx = _new_fx(r["focal_length_mm"])
+            r["fx_px"] = new_fx
+            r["fy_px"] = new_fx
+
+    print(f"[FL override] preset '{preset_name}' applied (sensor_w={sensor_width_mm}mm, image_w={image_width_px}px)")
+    for r in fl_results:
+        if r.get("rms") is not None:
+            zm = r["focal_length_mm"]
+            print(f"  {zm:.0f}mm ring -> actual FL {float(fl_interp(zm)):.1f}mm -> Fx={r['fx_px']/image_width_px:.4f}")
 
 
 # ---------------------------------------------------------------------------
@@ -202,7 +330,7 @@ def export_ue5_ulens(
         calib_w = int(w * squeeze_ratio) if squeeze_ratio > 1.0 else w
 
         fx = float(cm[0, 0]) / calib_w
-        fy = float(cm[1, 1]) / h
+        fy = float(cm[1, 1]) / calib_w
         cx = float(cm[0, 2]) / calib_w
         cy = float(cm[1, 2]) / h
 
@@ -306,6 +434,7 @@ def export_ue5_ulens_zoom(
     squeeze_ratio: float = 1.0,
     lens_type: str = "spherical",
     fl_interpolated: Optional[list] = None,
+    nodal_preset: str = "",
 ) -> dict:
     """
     Export a multi-focal-length .ulens file for zoom lenses.
@@ -321,6 +450,24 @@ def export_ue5_ulens_zoom(
     try:
         w, h = int(image_size[0]), int(image_size[1])
         calib_w = int(w * squeeze_ratio) if squeeze_ratio > 1.0 else w
+
+        # Work on a deep copy so we don't mutate the caller's data
+        import copy
+        fl_results     = copy.deepcopy(fl_results)
+        fl_interpolated = copy.deepcopy(fl_interpolated) if fl_interpolated else fl_interpolated
+        nodal_offsets_mm = dict(nodal_offsets_mm)
+
+        # Apply manufacturer nodal preset and FL override if requested
+        if nodal_preset:
+            presets = load_nodal_presets()
+            apply_fl_override(
+                nodal_preset, fl_results, fl_interpolated,
+                sensor_width_mm, w, presets=presets,
+            )
+            apply_nodal_preset(
+                nodal_preset, fl_results, fl_interpolated,
+                nodal_offsets_mm, presets=presets,
+            )
 
         # Calibrated rows (have a real camera_matrix)
         calibrated = sorted(
@@ -356,7 +503,7 @@ def export_ue5_ulens_zoom(
             if is_interp:
                 # Interpolated row: parameters are already in pixel units
                 fx_n = r["fx_px"] / calib_w
-                fy_n = r["fy_px"] / h
+                fy_n = r["fy_px"] / calib_w
                 cx_n = r["cx_px"] / calib_w
                 cy_n = r["cy_px"] / h
                 dc   = r.get("dist_coeffs", [0.0] * 5)
@@ -370,7 +517,7 @@ def export_ue5_ulens_zoom(
                 cm = np.array(r["camera_matrix"], dtype=np.float64)
                 dc_arr = np.array(r["dist_coeffs"], dtype=np.float64).flatten()
                 fx_n = float(cm[0, 0]) / calib_w
-                fy_n = float(cm[1, 1]) / h
+                fy_n = float(cm[1, 1]) / calib_w
                 cx_n = float(cm[0, 2]) / calib_w
                 cy_n = float(cm[1, 2]) / h
 

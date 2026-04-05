@@ -41,6 +41,7 @@ export interface CameraSettings {
   lensName: string;
   sensorWidthMm: string;   // string so inputs work naturally; parse on use
   sensorHeightMm: string;
+  nodalPreset: string;     // key from nodal_presets.json, e.g. "fujinon-premista-28-100"
 }
 
 export type ConnStatus = 'connecting' | 'connected' | 'disconnected' | 'error';

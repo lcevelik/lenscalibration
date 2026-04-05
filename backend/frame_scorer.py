@@ -9,13 +9,41 @@ from pose_advisor import compute_pose_metrics, compute_pose_metrics_sparse
 # Create once — constructing CLAHE per-frame wastes ~0.5 ms on every call
 _CLAHE = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
-# Sony AcuTarget: 5×6 marker grid, IDs 12..41, DICT_4X4_50.
+# Sony AcuTarget calibration chart — 8×6 checker squares, 50 mm/square.
+# ArUco markers in DICT_4X4_50.  IDs 12-31 = 20 markers (4 corner white
+# squares are occupied by the physical reference tabs, not ArUco codes).
+#
+# ID assignment pattern (derived empirically from production boards):
+#   Columns are numbered right→left; within each column, odd checker-rows
+#   (staggered +50 mm in x) come first, then even rows, all top→bottom.
+#
+# Physical position lookup: ID → (x_mm, y_mm) from the board origin (top-left).
+#   Even checker rows (0, 2, 4): x = 25, 125, 225, 325 mm
+#   Odd  checker rows (1, 3):    x = 75, 175, 275, 375 mm  (staggered +50 mm)
+#   Row y-positions: 25, 75, 125, 175, 225 mm  (50 mm pitch)
 _SONY_DICT_NAME = "DICT_4X4_50"
-_SONY_ID_START = 12
-_SONY_GRID_W = 5
-_SONY_GRID_H = 6
-_SONY_MARKER_SIZE = 1.0
-_SONY_MARKER_PITCH = 2.0
+_SONY_POS_MM: dict[int, tuple[float, float]] = {
+    12: (375.0,  75.0),   # col D (x=375), odd  row 1 (y= 75)
+    13: (375.0, 175.0),   # col D,          odd  row 3 (y=175)
+    14: (325.0,  25.0),   # col D (x=325), even row 0 (y= 25)
+    15: (325.0, 125.0),   # col D,          even row 2 (y=125)
+    16: (325.0, 225.0),   # col D,          even row 4 (y=225)
+    17: (275.0,  75.0),   # col C (x=275), odd  row 1
+    18: (275.0, 175.0),
+    19: (225.0,  25.0),   # col C (x=225), even row 0
+    20: (225.0, 125.0),
+    21: (225.0, 225.0),
+    22: (175.0,  75.0),   # col B (x=175), odd  row 1
+    23: (175.0, 175.0),
+    24: (125.0,  25.0),   # col B (x=125), even row 0
+    25: (125.0, 125.0),
+    26: (125.0, 225.0),
+    27: ( 75.0,  75.0),   # col A (x= 75), odd  row 1
+    28: ( 75.0, 175.0),
+    29: ( 25.0,  25.0),   # col A (x= 25), even row 0
+    30: ( 25.0, 125.0),
+    31: ( 25.0, 225.0),
+}
 
 
 def _partial_candidates(full_cols: int, full_rows: int) -> list:
@@ -241,30 +269,25 @@ def _detect_markers(gray: np.ndarray, dictionary):
 
 
 def _detect_sony_aruco_grid(gray: np.ndarray) -> tuple[bool, np.ndarray, list[list[float]]]:
-    """Detect Sony 5×6 AcuTarget ArUco grid and return per-corner image/object points.
+    """Detect Sony AcuTarget ArUco markers and return per-marker image/object points.
 
-    Tries detection on multiple preprocessed versions of the image to handle
-    dark, warm-tinted, or low-contrast captures from video camera outputs.
-    Works when only part of the board is visible (telephoto framing).
+    Uses a dict-based lookup (_SONY_POS_MM) so partial board views are handled
+    correctly — every visible marker is independently identified by its ID.
     """
     dictionary = _get_aruco_dictionary(_SONY_DICT_NAME)
     if dictionary is None:
         return False, np.empty((0, 2), dtype=np.float32), []
 
-    # Try several preprocessed versions — warm/dark SDI signals need extra help
     candidates = [gray]
-    # Equalised
     candidates.append(_CLAHE.apply(gray))
-    # Normalised stretch
     norm = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
     candidates.append(norm)
-    # Sharpened
     blurred = cv2.GaussianBlur(gray, (0, 0), 3)
-    sharp = cv2.addWeighted(gray, 1.5, blurred, -0.5, 0)
-    candidates.append(sharp)
+    candidates.append(cv2.addWeighted(gray, 1.5, blurred, -0.5, 0))
 
     best_pts: list[list[float]] = []
     best_obj: list[list[float]] = []
+    best_img = None
 
     for img in candidates:
         marker_corners, marker_ids = _detect_markers(img, dictionary)
@@ -274,23 +297,32 @@ def _detect_sony_aruco_grid(gray: np.ndarray) -> tuple[bool, np.ndarray, list[li
         pts: list[list[float]] = []
         obj: list[list[float]] = []
         for idx, marker_id in enumerate(marker_ids.flatten().tolist()):
-            mid = int(marker_id)
-            rel = mid - _SONY_ID_START
-            if rel < 0 or rel >= (_SONY_GRID_W * _SONY_GRID_H):
+            pos = _SONY_POS_MM.get(int(marker_id))
+            if pos is None:
                 continue
-            col = rel % _SONY_GRID_W
-            row = rel // _SONY_GRID_W
             img4 = np.array(marker_corners[idx], dtype=np.float32).reshape(4, 2)
-            # Use marker centre — avoids rotation-order ambiguity across markers
+            # Use the marker centre — avoids corner-ordering ambiguity across poses.
             center = img4.mean(axis=0)
             pts.append(center.tolist())
-            obj.append([float(col) * _SONY_MARKER_PITCH, float(row) * _SONY_MARKER_PITCH, 0.0])
+            obj.append([pos[0], pos[1], 0.0])
 
         if len(pts) > len(best_pts):
             best_pts, best_obj = pts, obj
+            best_img = img
 
     if len(best_pts) < 4:
         return False, np.empty((0, 2), dtype=np.float32), []
+
+    # Sub-pixel refinement on each marker centre.
+    if best_img is not None:
+        try:
+            pts_arr = np.array(best_pts, dtype=np.float32).reshape(-1, 1, 2)
+            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+            pts_arr = cv2.cornerSubPix(best_img, pts_arr, (7, 7), (-1, -1), criteria)
+            best_pts = pts_arr.reshape(-1, 2).tolist()
+        except cv2.error:
+            pass
+
     return True, np.array(best_pts, dtype=np.float32), best_obj
 
 

@@ -3,6 +3,7 @@ import type { BoardSettings, CameraSettings, CalibrationResult, ConnStatus, Lens
 import type { ZoomCalibResult, ZoomFlResult } from './components/GuidedCapture';
 import CoverageMap from './components/CoverageMap';
 import DropZone from './components/DropZone';
+import FileCalibration from './components/FileCalibration';
 import FrameGrid from './components/FrameGrid';
 import GuidedCapture from './components/GuidedCapture';
 import ResultPanel from './components/ResultPanel';
@@ -26,13 +27,15 @@ const BRAND_COLOR: Record<string, string> = {
 type PreviewFrame = { path: string; quality: 'good' | 'warn' | 'fail'; sharpness: number; coverage: number; index: number };
 
 const SENSOR_PRESETS = [
-  { label: 'Venice / Venice 2 FF (36.0 × 24.0)',    w: 36.0, h: 24.0 },
-  { label: 'Venice 2 / Burano FF 8K (35.9 × 24.0)', w: 35.9, h: 24.0 },
-  { label: 'Venice 2 / Burano S35 (26.2 × 14.7)',   w: 26.2, h: 14.7 },
-  { label: 'ALEXA 35 LF (27.99 × 19.22)',            w: 27.99, h: 19.22 },
-  { label: 'ALEXA 35 S35 (26.40 × 14.85)',           w: 26.40, h: 14.85 },
-  { label: 'RED V-RAPTOR 8K VV (40.96 × 21.60)',     w: 40.96, h: 21.60 },
-  { label: 'RED KOMODO 6K S35 (27.03 × 14.26)',      w: 27.03, h: 14.26 },
+  // CineAlta
+  { label: 'Venice — FF 6K (36.0 × 24.0)',                 w: 36.0,  h: 24.0  },
+  { label: 'Venice 2 / Burano — FF 8K (35.9 × 24.0)',      w: 35.9,  h: 24.0  },
+  { label: 'Venice 2 / Burano — S35 (26.2 × 14.7)',        w: 26.2,  h: 14.7  },
+  { label: 'Venice 2 / Burano — S16 (14.6 × 8.2)',         w: 14.6,  h: 8.2   },
+  // Broadcast B4
+  { label: 'HDC-series 2/3" HD B4 (9.59 × 5.39)',          w: 9.59,  h: 5.39  },
+  { label: 'HDC-F5500 / HDC-3500 4K 2/3" (9.59 × 5.39)',   w: 9.59,  h: 5.39  },
+  { label: 'HDC-5500 / HDW-series 2/3" (9.59 × 5.39)',     w: 9.59,  h: 5.39  },
 ];
 
 const STATUS_DOT: Record<ConnStatus, string> = {
@@ -105,6 +108,7 @@ function ZoomResultsPanel({ result, imageSize, ws, lensSettings, cameraSettings,
       image_size: imageSize, lens_name: cameraSettings.lensName.trim() || 'Lens',
       sensor_width_mm: parseFloat(cameraSettings.sensorWidthMm) || 0,
       sensor_height_mm: parseFloat(cameraSettings.sensorHeightMm) || 0,
+      nodal_preset: cameraSettings.nodalPreset.trim(),
       lens_type: lensSettings.lensType,
       squeeze_ratio: lensSettings.squeezeRatio,
     }));
@@ -270,10 +274,10 @@ export default function App() {
   const [detectedFps, setDetectedFps] = useState(30);
 
   // Lens settings (shared across both tabs)
-  const [lensSettings, setLensSettings] = useState<LensSettings>({ lensType: 'spherical', squeezeRatio: 2.0 });
+  const [lensSettings, setLensSettings] = useState<LensSettings>({ lensType: 'spherical', squeezeRatio: 1.0 });
 
   // Camera / sensor settings (shared across both tabs)
-  const [cameraSettings, setCameraSettings] = useState<CameraSettings>({ lensName: '', sensorWidthMm: '', sensorHeightMm: '' });
+  const [cameraSettings, setCameraSettings] = useState<CameraSettings>({ lensName: '', sensorWidthMm: '', sensorHeightMm: '', nodalPreset: '' });
 
   // Calibration state (shared across both tabs)
   const [boardSettings, setBoardSettings] = useState<BoardSettings>({ cols: 9, rows: 6, squareSizeMm: 25 });
@@ -543,72 +547,22 @@ export default function App() {
 
         {/* ── FILE CALIBRATION ── */}
         {tab === 'file' && (
-          <div className="grid grid-cols-5 gap-5 items-start">
-
-            {/* Left column */}
-            <div className="col-span-2 space-y-4">
-              <div className="rounded-xl bg-slate-800 border border-slate-700 p-4">
-                <DropZone
-                  ws={ws}
-                  boardSettings={boardSettings}
-                  onBoardChange={setBoardSettings}
-                  onScoringDone={newFrames =>
-                    setFrames(prev => {
-                      const existingPaths = new Set(prev.map(f => f.path));
-                      const deduped = newFrames.filter(f => !existingPaths.has(f.path));
-                      return [...prev, ...deduped];
-                    })
-                  }
-                />
-              </div>
-
-              <FrameGrid
-                frames={frames}
-                excluded={excluded}
-                onToggle={toggleExclude}
-                backendPort={backendPort}
-              />
-            </div>
-
-            {/* Right column */}
-            <div className="col-span-3 space-y-4">
-              <CoverageMap frames={frames} imageSize={imageSize} />
-
-              {/* Run calibration */}
-              {frames.length > 0 && (
-                <div className="flex items-center gap-3">
-                  <button
-                    type="button"
-                    onClick={runCalibration}
-                    disabled={!canCalibrate || calibrating}
-                    className={`px-5 py-2.5 rounded-lg text-sm font-semibold transition-colors ${
-                      canCalibrate && !calibrating
-                        ? 'bg-blue-600 hover:bg-blue-500 text-white'
-                        : 'bg-slate-700 text-slate-500 cursor-not-allowed'
-                    }`}
-                  >
-                    {calibrating
-                      ? 'Calibrating…'
-                      : canCalibrate
-                      ? `Run Calibration (${includedFrames.length} frames)`
-                      : 'Need ≥ 3 non-fail frames'}
-                  </button>
-                  {calibrating && (
-                    <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
-                  )}
-                  {calibResult && !calibrating && (
-                    <button
-                      type="button"
-                      onClick={() => setTab('results')}
-                      className="text-xs text-emerald-400 hover:text-emerald-300 underline underline-offset-2"
-                    >
-                      View results →
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
+          <FileCalibration
+            ws={ws}
+            boardSettings={boardSettings}
+            onBoardChange={setBoardSettings}
+            lensSettings={lensSettings}
+            cameraSettings={cameraSettings}
+            onCameraSettingsChange={setCameraSettings}
+            backendPort={backendPort}
+            calibrating={calibrating}
+            setCalibrating={setCalibrating}
+            onZoomCalibrationComplete={onZoomCalibrationComplete}
+            onSingleCalibrationSent={(imgSize, previewFrames) => {
+              pendingImageSizeRef.current = imgSize;
+              pendingFramesRef.current = previewFrames;
+            }}
+          />
         )}
 
         {/* ── LIVE CALIBRATION ── */}
@@ -767,6 +721,15 @@ export default function App() {
                   onChange={e => setCameraSettings(s => ({ ...s, lensName: e.target.value }))}
                   placeholder="e.g. Fujinon Premista 28-100"
                   className="bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500" />
+              </label>
+
+              <label className="flex flex-col gap-1">
+                <span className="text-xs text-slate-400">Nodal preset</span>
+                <input value={cameraSettings.nodalPreset}
+                  onChange={e => setCameraSettings(s => ({ ...s, nodalPreset: e.target.value }))}
+                  placeholder="e.g. fujinon-premista-28-100 (leave blank to skip)"
+                  className="bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500" />
+                <span className="text-[11px] text-slate-500">Key from nodal_presets.json — overrides OpenCV focal length and nodal offset with manufacturer values.</span>
               </label>
             </div>
 

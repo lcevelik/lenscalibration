@@ -1,0 +1,21 @@
+{
+  "_comment": "Nodal offset presets.  Each key is the preset name used with --nodal-preset.",
+  "_format": "List of [focal_length_mm, entrance_pupil_distance_from_flange_mm] pairs, measured at infinity focus.",
+
+  "fujinon-premista-28-100": {
+    "description": "Fujinon Premista 28-100mm T2.9 — entrance pupil from flange (manufacturer spec)",
+    "focal_lengths_mm": [
+      [28.0,  28.0],
+      [100.0, 100.0]
+    ],
+    "points": [
+      [28.0,  151.4],
+      [35.0,  144.2],
+      [40.0,  139.7],
+      [50.0,  135.8],
+      [65.0,  128.4],
+      [85.0,  122.5],
+      [100.0, 118.3]
+    ]
+  }
+}

@@ -637,6 +637,7 @@ export default function GuidedCapture({ ws, boardSettings, onCalibrationSent, on
       image_size: actualSize, lens_name: cameraSettings.lensName.trim() || 'Lens',
       sensor_width_mm: parseFloat(cameraSettings.sensorWidthMm) || 0,
       sensor_height_mm: parseFloat(cameraSettings.sensorHeightMm) || 0,
+      nodal_preset: cameraSettings.nodalPreset.trim(),
       lens_type: lensSettings.lensType,
       squeeze_ratio: lensSettings.squeezeRatio,
     }));

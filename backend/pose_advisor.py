@@ -91,6 +91,24 @@ REQUIRED_POSES: list[dict] = [
         "size_min":  0.06,
     },
     {
+        "id":        "left_edge",
+        "name":      "Left edge",
+        "hint":      "Move the board to the centre-left of the frame (halfway up, left side)",
+        "region":    [3],
+        "tilt_max":  1.00,
+        "tilt_min":  0.00,
+        "size_min":  0.06,
+    },
+    {
+        "id":        "right_edge",
+        "name":      "Right edge",
+        "hint":      "Move the board to the centre-right of the frame (halfway up, right side)",
+        "region":    [5],
+        "tilt_max":  1.00,
+        "tilt_min":  0.00,
+        "size_min":  0.06,
+    },
+    {
         "id":        "close_up",
         "name":      "Close-up (large in frame)",
         "hint":      "Move the board closer so it fills about a quarter of the frame",
@@ -183,6 +201,24 @@ FIXED_MOUNT_REQUIRED_POSES: list[dict] = [
         "size_min": 0.04,
     },
     {
+        "id":       "left_edge",
+        "name":     "Pan to left edge",
+        "hint":     "Pan the camera so the chart appears in the centre-left of the frame",
+        "region":   [3],
+        "tilt_max": 1.00,
+        "tilt_min": 0.00,
+        "size_min": 0.04,
+    },
+    {
+        "id":       "right_edge",
+        "name":     "Pan to right edge",
+        "hint":     "Pan the camera so the chart appears in the centre-right of the frame",
+        "region":   [5],
+        "tilt_max": 1.00,
+        "tilt_min": 0.00,
+        "size_min": 0.04,
+    },
+    {
         "id":       "offcenter_tilt",
         "name":     "Off-centre with angle",
         "hint":     "Pan camera to an edge so the chart is off-centre AND shows visible foreshortening",
@@ -233,6 +269,8 @@ def get_required_poses(focal_length_mm: float | None = None, fixed_mount: bool =
                     "center_tilted_v": {"tilt_min": 0.11},
                     "offcenter_tilt":  {"tilt_min": 0.13},
                     "strong_tilt":     {"tilt_min": 0.13},
+                    "left_edge":       {"region": [0, 3, 6]},
+                    "right_edge":      {"region": [2, 5, 8]},
                 }
             elif focal_length_mm < 50:
                 fm_adjustments = {
@@ -240,13 +278,17 @@ def get_required_poses(focal_length_mm: float | None = None, fixed_mount: bool =
                     "center_tilted_v": {"tilt_min": 0.13},
                     "offcenter_tilt":  {"tilt_min": 0.15},
                     "strong_tilt":     {"tilt_min": 0.15},
+                    "left_edge":       {"region": [0, 3, 6]},
+                    "right_edge":      {"region": [2, 5, 8]},
                 }
             elif focal_length_mm < 85:
                 fm_adjustments = {
-                    "corner_tl": {"region": [0, 1, 3],    "size_min": 0.03},
-                    "corner_tr": {"region": [1, 2, 5],    "size_min": 0.03},
-                    "corner_bl": {"region": [3, 6, 7],    "size_min": 0.03},
-                    "corner_br": {"region": [5, 7, 8],    "size_min": 0.03},
+                    "corner_tl":  {"region": [0, 1, 3],    "size_min": 0.03},
+                    "corner_tr":  {"region": [1, 2, 5],    "size_min": 0.03},
+                    "corner_bl":  {"region": [3, 6, 7],    "size_min": 0.03},
+                    "corner_br":  {"region": [5, 7, 8],    "size_min": 0.03},
+                    "left_edge":  {"region": [0, 3, 6],    "size_min": 0.03},
+                    "right_edge": {"region": [2, 5, 8],    "size_min": 0.03},
                 }
             elif focal_length_mm < 135:
                 fm_adjustments = {
@@ -254,10 +296,12 @@ def get_required_poses(focal_length_mm: float | None = None, fixed_mount: bool =
                     "center_tilted_v": {"tilt_min": 0.07, "region": [0, 1, 2, 3, 4, 5, 6, 7, 8]},
                     "offcenter_tilt":  {"tilt_min": 0.08},
                     "strong_tilt":     {"tilt_min": 0.07},
-                    "corner_tl": {"region": [0, 1, 3, 4], "size_min": 0.025},
-                    "corner_tr": {"region": [1, 2, 4, 5], "size_min": 0.025},
-                    "corner_bl": {"region": [3, 4, 6, 7], "size_min": 0.025},
-                    "corner_br": {"region": [4, 5, 7, 8], "size_min": 0.025},
+                    "corner_tl":  {"region": [0, 1, 3, 4], "size_min": 0.025},
+                    "corner_tr":  {"region": [1, 2, 4, 5], "size_min": 0.025},
+                    "corner_bl":  {"region": [3, 4, 6, 7], "size_min": 0.025},
+                    "corner_br":  {"region": [4, 5, 7, 8], "size_min": 0.025},
+                    "left_edge":  {"region": [0, 1, 3, 4], "size_min": 0.025},
+                    "right_edge": {"region": [1, 2, 4, 5], "size_min": 0.025},
                 }
             else:
                 fm_adjustments = {
@@ -265,10 +309,12 @@ def get_required_poses(focal_length_mm: float | None = None, fixed_mount: bool =
                     "center_tilted_v": {"tilt_min": 0.05, "region": [0, 1, 2, 3, 4, 5, 6, 7, 8]},
                     "offcenter_tilt":  {"tilt_min": 0.06},
                     "strong_tilt":     {"tilt_min": 0.05},
-                    "corner_tl": {"region": [0, 1, 3, 4], "size_min": 0.02},
-                    "corner_tr": {"region": [1, 2, 4, 5], "size_min": 0.02},
-                    "corner_bl": {"region": [3, 4, 6, 7], "size_min": 0.02},
-                    "corner_br": {"region": [4, 5, 7, 8], "size_min": 0.02},
+                    "corner_tl":  {"region": [0, 1, 3, 4], "size_min": 0.02},
+                    "corner_tr":  {"region": [1, 2, 4, 5], "size_min": 0.02},
+                    "corner_bl":  {"region": [3, 4, 6, 7], "size_min": 0.02},
+                    "corner_br":  {"region": [4, 5, 7, 8], "size_min": 0.02},
+                    "left_edge":  {"region": [0, 1, 3, 4, 6, 7], "size_min": 0.02},
+                    "right_edge": {"region": [1, 2, 4, 5, 7, 8], "size_min": 0.02},
                 }
             for pose in poses:
                 update = fm_adjustments.get(pose["id"])
@@ -286,6 +332,8 @@ def get_required_poses(focal_length_mm: float | None = None, fixed_mount: bool =
             "center_tilted_v": {"tilt_min": 0.14, "size_min": 0.08},
             "close_up":        {"size_min": 0.16},
             "strong_tilt":     {"tilt_min": 0.14, "size_min": 0.04},
+            "left_edge":       {"region": [0, 3, 6], "size_min": 0.05},
+            "right_edge":      {"region": [2, 5, 8], "size_min": 0.05},
         }
     elif focal_length_mm < 50:
         adjustments = {
@@ -293,6 +341,8 @@ def get_required_poses(focal_length_mm: float | None = None, fixed_mount: bool =
             "center_tilted_v": {"tilt_min": 0.17, "size_min": 0.09},
             "close_up":        {"size_min": 0.18},
             "strong_tilt":     {"tilt_min": 0.16, "size_min": 0.045},
+            "left_edge":       {"region": [0, 3, 6], "size_min": 0.05},
+            "right_edge":      {"region": [2, 5, 8], "size_min": 0.05},
         }
     elif focal_length_mm < 85:
         adjustments = {
@@ -305,6 +355,8 @@ def get_required_poses(focal_length_mm: float | None = None, fixed_mount: bool =
             "corner_bl":       {"region": [3, 6, 7],    "size_min": 0.05},
             "corner_br":       {"region": [5, 7, 8],    "size_min": 0.05},
             "top_or_bottom":   {"size_min": 0.05},
+            "left_edge":       {"region": [0, 3, 6],    "size_min": 0.04},
+            "right_edge":      {"region": [2, 5, 8],    "size_min": 0.04},
         }
     elif focal_length_mm < 135:
         adjustments = {
@@ -324,6 +376,13 @@ def get_required_poses(focal_length_mm: float | None = None, fixed_mount: bool =
                                 "name": "Strong tilt V", "hint": "Tilt the chart strongly top or bottom"},
             "top_or_bottom":   {"region": None, "tilt_min": 0.10, "size_min": 0.04,
                                 "name": "Any tilt", "hint": "Tilt the chart in any direction"},
+            # left/right edge impossible at 85-135mm — use off-centre tilt variants
+            "left_edge":       {"region": None, "tilt_min": 0.10, "size_min": 0.04,
+                                "name": "Off-centre tilt",
+                                "hint": "Tilt the chart and shift it off-centre"},
+            "right_edge":      {"region": None, "tilt_min": 0.15, "size_min": 0.04,
+                                "name": "Off-centre tilt 2",
+                                "hint": "Tilt the chart to a different off-centre position"},
         }
     else:
         adjustments = {
@@ -342,6 +401,12 @@ def get_required_poses(focal_length_mm: float | None = None, fixed_mount: bool =
                                 "name": "Strong tilt V", "hint": "Tilt the chart strongly top or bottom"},
             "top_or_bottom":   {"region": None, "tilt_min": 0.08, "size_min": 0.025,
                                 "name": "Any tilt", "hint": "Tilt the chart in any direction"},
+            "left_edge":       {"region": None, "tilt_min": 0.08, "size_min": 0.025,
+                                "name": "Off-centre tilt",
+                                "hint": "Tilt the chart and shift it off-centre"},
+            "right_edge":      {"region": None, "tilt_min": 0.13, "size_min": 0.025,
+                                "name": "Off-centre tilt 2",
+                                "hint": "Tilt the chart to a different off-centre position"},
         }
 
     for pose in poses:

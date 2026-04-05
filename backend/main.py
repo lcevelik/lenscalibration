@@ -155,7 +155,8 @@ async def _handle_calibrate_zoom(websocket: WebSocket, message: dict) -> None:
 
     total_frames = sum(len(g.get("frames", [])) for g in fl_groups)
     print(
-        f"[zoom_calibrate] received request: fls={len(fl_groups)} total_frames={total_frames} size={image_size} squeeze={squeeze_ratio}",
+        f"[zoom_calibrate] received: fls={len(fl_groups)} frames={total_frames} size={image_size} "
+        f"sensor_w={sensor_width_mm} sensor_h={sensor_height_mm} squeeze={squeeze_ratio}",
         flush=True,
     )
     await websocket.send_text(json.dumps({
@@ -169,8 +170,10 @@ async def _handle_calibrate_zoom(websocket: WebSocket, message: dict) -> None:
         fl_groups, board_cols, board_rows, square_size_mm, image_size,
         sensor_width_mm, sensor_height_mm, squeeze_ratio,
     )
+    fl_summary = [(r.get('focal_length_mm'), r.get('rms'), r.get('error')) for r in result.get('fl_results', [])]
     print(
-        f"[zoom_calibrate] result sent: success={result.get('success')} error={result.get('error')} rows={len(result.get('fl_results', []))}",
+        f"[zoom_calibrate] result: success={result.get('success')} error={result.get('error')} "
+        f"nodal={result.get('nodal_offsets_mm')} fl_results={fl_summary}",
         flush=True,
     )
     await websocket.send_text(json.dumps({"action": "zoom_calibrate_result", **result}))
@@ -220,6 +223,7 @@ async def _handle_export(websocket: WebSocket, message: dict) -> None:
         lens_name        = message.get("lens_name", "Lens")
         sensor_width_mm  = float(message.get("sensor_width_mm",  0.0))
         sensor_height_mm = float(message.get("sensor_height_mm", 0.0))
+        nodal_preset     = str(message.get("nodal_preset", ""))
         fn = lambda: export_ue5_ulens_zoom(
             output_path, fl_results, image_size, nodal_offsets_mm,
             lens_name=lens_name,
@@ -228,6 +232,7 @@ async def _handle_export(websocket: WebSocket, message: dict) -> None:
             squeeze_ratio=squeeze_ratio,
             lens_type=lens_type,
             fl_interpolated=fl_interpolated,
+            nodal_preset=nodal_preset,
         )
     else:
         lens_name        = message.get("lens_name", "Lens")

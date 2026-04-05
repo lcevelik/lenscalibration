@@ -49,8 +49,12 @@ function startBackend(port) {
       }
     };
 
-    backendProcess.stdout.on('data', onReady);
-    backendProcess.stderr.on('data', onReady);
+    const logStream = (prefix) => (data) => {
+      const lines = data.toString().split('\n').filter(l => l.trim());
+      lines.forEach(l => console.log(`[backend:${prefix}] ${l}`));
+    };
+    backendProcess.stdout.on('data', (d) => { onReady(d); logStream('out')(d); });
+    backendProcess.stderr.on('data', (d) => { onReady(d); logStream('err')(d); });
 
     backendProcess.on('error', (err) => {
       clearTimeout(startupTimer);

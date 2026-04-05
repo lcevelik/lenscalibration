@@ -194,9 +194,15 @@ def run_zoom_calibration(
 
     def _run_constrained_fallback(obj_points_local: list, img_points_local: list, calib_size_local: tuple):
         w, h = calib_size_local
+        # Use the same physics-based init as the primary sparse solve so the
+        # fallback also starts close to the true focal length.
+        if sensor_width_mm > 0 and fl_mm > 0:  # noqa: B023 (closure captures current loop value)
+            fx_fb = float(fl_mm) * float(w) / float(sensor_width_mm)
+        else:
+            fx_fb = float(max(w, h))
         cam0 = np.array(
-            [[max(w, h), 0.0, w / 2.0],
-             [0.0, max(w, h), h / 2.0],
+            [[fx_fb, 0.0, w / 2.0],
+             [0.0, fx_fb, h / 2.0],
              [0.0, 0.0, 1.0]],
             dtype=np.float64,
         )
@@ -230,13 +236,12 @@ def run_zoom_calibration(
             continue
 
         # Keep one detection model per FL solve to avoid mixed board geometry.
+        # Pick the detection type with the most qualified frames (same logic as calibrator.py).
         det_counter = Counter((f.get("detection_type") or "checkerboard") for f in usable)
-        selected_det = None
-        for det_name in ("checkerboard", "aruco_grid", "charuco"):
-            if det_counter.get(det_name, 0) >= 3:
-                selected_det = det_name
-                break
-        if selected_det is None:
+        qualified = [d for d in det_counter if det_counter[d] >= 3]
+        if qualified:
+            selected_det = max(qualified, key=lambda d: det_counter[d])
+        else:
             selected_det = det_counter.most_common(1)[0][0]
         usable = [f for f in usable if (f.get("detection_type") or "checkerboard") == selected_det]
 
@@ -250,8 +255,10 @@ def run_zoom_calibration(
                 obj = np.array(frame_obj_points, dtype=np.float32).reshape(-1, 3)
                 if obj.shape[0] != corners.shape[0] or obj.shape[0] < 6:
                     continue
-                if (frame.get("detection_type") or "") == "aruco_grid":
+                if (frame.get("detection_type") or "") == "charuco":
+                    # ChArUco obj points are in board-square units; scale to mm.
                     obj = obj * float(square_size_mm)
+                # aruco_grid obj points are already in mm (Sony board lookup table).
                 sparse_mode = True
             elif partial_size:
                 p_cols, p_rows = int(partial_size[0]), int(partial_size[1])
@@ -288,9 +295,17 @@ def run_zoom_calibration(
         dc0 = None
         if sparse_mode:
             w0, h0 = calib_size
+            # Physics-based initial focal length: fl_mm × pixels/mm.
+            # Using max(w,h) as a fallback misses telephoto FLs (e.g. 100 mm
+            # on a 36 mm sensor gives fx≈5333 px vs the fallback 1920 px —
+            # a 178% gap that causes the solver to diverge).
+            if sensor_width_mm > 0 and fl_mm > 0:
+                fx0_init = float(fl_mm) * float(w0) / float(sensor_width_mm)
+            else:
+                fx0_init = float(max(w0, h0))
             cam0 = np.array(
-                [[max(w0, h0), 0.0, w0 / 2.0],
-                 [0.0, max(w0, h0), h0 / 2.0],
+                [[fx0_init, 0.0, w0 / 2.0],
+                 [0.0, fx0_init, h0 / 2.0],
                  [0.0, 0.0, 1.0]],
                 dtype=np.float64,
             )
@@ -449,7 +464,7 @@ def run_zoom_calibration(
             "optical_center_world":     mean_center.tolist(),
             "used_frames":              len(obj_points),
             "per_image_errors":         pie,
-            "confidence":               _confidence(rms),
+            "confidence":               _confidence(rms, sparse=sparse_mode),
             "detection_type":           selected_det,
             "warning":                  solve_warning,
             "error":                    None,
@@ -829,8 +844,15 @@ def _make_objp(cols: int, rows: int, square_size_mm: float) -> np.ndarray:
     return pts
 
 
-def _confidence(rms: float) -> str:
-    if rms < 0.3: return "excellent"
-    if rms < 0.5: return "good"
-    if rms < 1.0: return "marginal"
-    return "poor"
+def _confidence(rms: float, sparse: bool = False) -> str:
+    """Grade calibration quality. Sparse-board (ArUco) tolerates higher RMS."""
+    if sparse:
+        if rms < 0.7:  return "excellent"
+        if rms < 1.5:  return "good"
+        if rms < 3.0:  return "marginal"
+        return "poor"
+    else:
+        if rms < 0.3:  return "excellent"
+        if rms < 0.5:  return "good"
+        if rms < 1.0:  return "marginal"
+        return "poor"
