@@ -132,6 +132,11 @@ export default function UndistortPreview({ scoredFrames, cameraMatrix, distCoeff
     setSplitPos(Math.round(pct));
   };
 
+  // Keep the CSS custom property in sync with splitPos
+  useEffect(() => {
+    containerRef.current?.style.setProperty('--split-pct', `${splitPos}%`);
+  }, [splitPos]);
+
   if (previewable.length === 0) {
     return (
       <div className="rounded-xl bg-slate-800 border border-slate-700 p-6 text-slate-400 text-sm">
@@ -152,6 +157,7 @@ export default function UndistortPreview({ scoredFrames, cameraMatrix, distCoeff
       <div className="flex items-center gap-3">
         <label className="text-xs text-slate-400 shrink-0">Frame</label>
         <select
+          aria-label="Preview frame"
           value={selectedIndex}
           onChange={(e) => setSelectedIndex(Number(e.target.value))}
           className="flex-1 bg-slate-700 border border-slate-600 text-slate-200 text-xs rounded-lg px-3 py-1.5 focus:outline-none focus:border-blue-500"
@@ -173,8 +179,7 @@ export default function UndistortPreview({ scoredFrames, cameraMatrix, distCoeff
       {/* Image split view */}
       <div
         ref={containerRef}
-        className="relative rounded-lg overflow-hidden bg-slate-900 select-none cursor-col-resize"
-        style={{ aspectRatio: '16 / 9' }}
+        className="relative rounded-lg overflow-hidden bg-slate-900 select-none cursor-col-resize undistort-container"
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
@@ -196,6 +201,7 @@ export default function UndistortPreview({ scoredFrames, cameraMatrix, distCoeff
             {/* Original — bottom layer, always full width */}
             <img
               src={images.original}
+              alt="Original image"
               className="absolute inset-0 w-full h-full object-contain pointer-events-none"
               draggable={false}
             />
@@ -203,20 +209,18 @@ export default function UndistortPreview({ scoredFrames, cameraMatrix, distCoeff
             {/* Undistorted — top layer, revealed from the left */}
             <img
               src={images.undistorted}
-              className="absolute inset-0 w-full h-full object-contain pointer-events-none"
-              style={{ clipPath: `inset(0 ${100 - splitPos}% 0 0)` }}
+              alt="Undistorted image"
+              className="absolute inset-0 w-full h-full object-contain pointer-events-none undistort-clipped"
               draggable={false}
             />
 
             {/* Divider line */}
             <div
-              className="absolute top-0 bottom-0 w-px bg-white/70 shadow-[0_0_6px_rgba(0,0,0,0.8)] pointer-events-none"
-              style={{ left: `${splitPos}%` }}
+              className="absolute top-0 bottom-0 w-px bg-white/70 shadow-[0_0_6px_rgba(0,0,0,0.8)] pointer-events-none undistort-divider"
             />
             {/* Handle knob */}
             <div
-              className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-6 h-6 rounded-full bg-white/90 shadow-lg flex items-center justify-center pointer-events-none"
-              style={{ left: `${splitPos}%` }}
+              className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-6 h-6 rounded-full bg-white/90 shadow-lg flex items-center justify-center pointer-events-none undistort-handle"
             >
               <span className="text-slate-800 text-[10px] font-bold select-none">⇔</span>
             </div>
@@ -241,6 +245,7 @@ export default function UndistortPreview({ scoredFrames, cameraMatrix, distCoeff
       {/* Slider fallback */}
       <div className="space-y-1">
         <input
+          aria-label="Split position"
           type="range"
           min={0}
           max={100}

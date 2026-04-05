@@ -104,14 +104,13 @@ export default function CoverageMap({ frames, imageSize }: Props) {
         ref={canvasRef}
         width={GRID_COLS * 32}
         height={GRID_ROWS * 32}
-        className="w-full rounded-lg"
-        style={{ imageRendering: 'pixelated' }}
+        className="w-full rounded-lg coverage-canvas"
       />
 
       {/* Legend */}
       <div className="flex items-center gap-3 text-[10px] text-slate-500">
         <span className="flex items-center gap-1">
-          <span className="w-3 h-3 rounded-sm inline-block" style={{ background: '#1e293b', border: '1px solid #334155' }} />
+          <span className="w-3 h-3 rounded-sm inline-block coverage-legend-empty" />
           No corners
         </span>
         <span className="flex items-center gap-1">

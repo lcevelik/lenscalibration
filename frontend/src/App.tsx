@@ -619,6 +619,7 @@ export default function App() {
               )}
               {!scanning && devices.length > 1 && (
                 <select
+                  aria-label="Capture device"
                   value={selectedIdx ?? ''}
                   onChange={e => setSelectedIdx(Number(e.target.value))}
                   className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500"
@@ -674,6 +675,7 @@ export default function App() {
                   <div className="flex items-center gap-2">
                     <span className="text-xs text-slate-500">Custom:</span>
                     <input type="number" min={1} max={4} step={0.01}
+                      aria-label="Custom squeeze ratio"
                       value={lensSettings.squeezeRatio}
                       onChange={e => {
                         const v = parseFloat(e.target.value);

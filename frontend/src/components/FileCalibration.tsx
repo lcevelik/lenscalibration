@@ -282,6 +282,7 @@ export default function FileCalibration({
 
         {/* Preset dropdown */}
         <select
+          aria-label="Camera sensor preset"
           disabled={busy}
           value={SENSOR_PRESETS.find(
             p => cameraSettings.sensorWidthMm === String(p.w) && cameraSettings.sensorHeightMm === String(p.h)
@@ -434,16 +435,11 @@ export default function FileCalibration({
                   <p className="text-xs text-slate-300">
                     Scoring {scoringProgress.done} / {scoringProgress.total}…
                   </p>
-                  <div className="w-40 h-1.5 bg-slate-700 rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-blue-500 rounded-full transition-all"
-                      style={{
-                        width: `${scoringProgress.total > 0
-                          ? (scoringProgress.done / scoringProgress.total) * 100
-                          : 0}%`,
-                      }}
-                    />
-                  </div>
+                  <progress
+                    className="dropzone-progress-bar"
+                    value={scoringProgress.done}
+                    max={scoringProgress.total}
+                  />
                 </div>
               ) : (
                 <div className="flex items-center gap-2 rounded-lg border border-dashed border-slate-600 bg-slate-700/30 px-4 py-3">

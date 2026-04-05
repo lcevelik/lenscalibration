@@ -4,6 +4,7 @@ declare global {
   interface Window {
     electronAPI?: {
       getBackendPort: () => Promise<number>;
+      getLocalIP: () => Promise<string>;
       showSaveDialog: (options: {
         defaultPath?: string;
         filters?: Array<{ name: string; extensions: string[] }>;

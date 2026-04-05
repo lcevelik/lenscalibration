@@ -29,3 +29,48 @@
 .hold-ring-arc {
   transition: stroke-dasharray 0.1s linear, stroke 0.2s ease;
 }
+
+/* Coverage map canvas */
+.coverage-canvas {
+  image-rendering: pixelated;
+}
+
+/* Coverage map legend — empty-cell swatch */
+.coverage-legend-empty {
+  background: #1e293b;
+  border: 1px solid #334155;
+}
+
+/* Result panel — per-frame error bar */
+.result-error-bar {
+  flex: 1;
+  height: 0.375rem;
+  appearance: none;
+  border: none;
+  border-radius: 9999px;
+  overflow: hidden;
+  background-color: #334155; /* slate-700 */
+}
+.result-error-bar::-webkit-progress-bar  { background-color: #334155; border-radius: 9999px; }
+.result-error-bar::-webkit-progress-value { border-radius: 9999px; transition: width 0.3s ease; }
+.result-error-bar::-moz-progress-bar     { border-radius: 9999px; transition: width 0.3s ease; }
+.result-error-bar.bar-good::-webkit-progress-value { background-color: #10b981; }
+.result-error-bar.bar-good::-moz-progress-bar       { background-color: #10b981; }
+.result-error-bar.bar-warn::-webkit-progress-value { background-color: #eab308; }
+.result-error-bar.bar-warn::-moz-progress-bar       { background-color: #eab308; }
+.result-error-bar.bar-bad::-webkit-progress-value  { background-color: #ef4444; }
+.result-error-bar.bar-bad::-moz-progress-bar        { background-color: #ef4444; }
+
+/* Undistort split-view */
+.undistort-container {
+  aspect-ratio: 16 / 9;
+}
+.undistort-clipped {
+  clip-path: inset(0 calc(100% - var(--split-pct)) 0 0);
+}
+.undistort-divider {
+  left: var(--split-pct);
+}
+.undistort-handle {
+  left: var(--split-pct);
+}

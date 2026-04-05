@@ -211,9 +211,9 @@ export default function ResultPanel({ result, imageSize, ws }: Props) {
   const maxErr = Math.max(...errors.map((e) => e.error), 0.001);
   const meanErr = errors.reduce((s, e) => s + e.error, 0) / (errors.length || 1);
 
-  const barColor = (entry: { error: number; outlier: boolean }) =>
-    entry.outlier         ? 'bg-red-500' :
-    entry.error > meanErr ? 'bg-yellow-500' : 'bg-emerald-500';
+  const barVariant = (entry: { error: number; outlier: boolean }) =>
+    entry.outlier         ? 'bar-bad' :
+    entry.error > meanErr ? 'bar-warn' : 'bar-good';
 
   return (
     <div className="rounded-xl bg-slate-800 border border-slate-700 p-5 space-y-6">
@@ -324,12 +324,11 @@ export default function ResultPanel({ result, imageSize, ws }: Props) {
                 >
                   {filename(entry.path)}
                 </span>
-                <div className="flex-1 bg-slate-700 rounded-full h-1.5 overflow-hidden">
-                  <div
-                    className={`h-full rounded-full transition-all ${barColor(entry)}`}
-                    style={{ width: `${(entry.error / maxErr) * 100}%` }}
+                <progress
+                    className={`result-error-bar ${barVariant(entry)}`}
+                    value={entry.error}
+                    max={maxErr}
                   />
-                </div>
                 <span
                   className={`w-14 shrink-0 text-right font-mono tabular-nums ${
                     entry.outlier ? 'text-red-400' : 'text-slate-400'
@@ -373,6 +372,7 @@ export default function ResultPanel({ result, imageSize, ws }: Props) {
           <div className="flex flex-col gap-0.5">
             <span className="text-[10px] text-slate-500">Camera preset</span>
             <select
+              aria-label="Camera sensor preset"
               defaultValue=""
               onChange={e => {
                 const preset = SENSOR_PRESETS.find(p => p.label === e.target.value);

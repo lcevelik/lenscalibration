@@ -134,8 +134,7 @@ export default function PoseDiagram({ poseId, size = 'sm', satisfied = false }: 
       viewBox="0 0 100 70"
       width={px}
       height={py}
-      className="rounded overflow-hidden shrink-0"
-      style={{ background: '#0f172a' }}
+      className="rounded overflow-hidden shrink-0 bg-slate-950"
       aria-label={`Pose diagram for ${poseId}`}
     >
       {/* ── Defs ─────────────────────────────────────────── */}
@@ -164,7 +163,7 @@ export default function PoseDiagram({ poseId, size = 'sm', satisfied = false }: 
       </defs>
 
       {/* ── Frame background ─────────────────────────────── */}
-      <rect width="100" height="70" fill="#0f172a" />
+      <rect width="100" height="70" className="fill-slate-950" fill="#0f172a" />
 
       {/* 3×3 region grid */}
       <line x1="33.3" y1="0" x2="33.3" y2="70" stroke={gridColor} strokeWidth="0.6" />
