@@ -74,3 +74,9 @@
 .undistort-handle {
   left: var(--split-pct);
 }
+
+
+/* Requirement bar fill — width driven by CSS custom property set on the element */
+.req-bar-fill {
+  width: var(--bar-pct, 0%);
+}

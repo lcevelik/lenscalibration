@@ -34,6 +34,12 @@ interface MatchStatus  {
   tilt_hint?: string;
   size_score?: number;
   size_hint?: string;
+  // Level 1 — sharpness
+  sharpness_ok?: boolean;
+  sharpness_score?: number;
+  sharpness_hint?: string;
+  // Level 2 — border proximity
+  border_hint?: string | null;
 }
 
 interface LiveFrame {
@@ -43,8 +49,11 @@ interface LiveFrame {
   auto_captured: boolean; frame_count: number;
   checklist: PoseItem[]; satisfied_count: number; total: number; complete: boolean;
   next_hint: string; next_pose_id: string | null; matching_pose_id: string | null;
-  hold_progress: number; message: string;
+  hold_progress: number; message: string; image_width: number; image_height: number;
   next_pose_reqs: NextPoseReqs | null; match_status: MatchStatus | null;
+  // Level 3 — coverage
+  coverage_grid?: number[][] | null;
+  frame_coverage_pct?: number;
 }
 
 interface FlGroup {
@@ -180,6 +189,116 @@ function computeFrameDiversity(frames: ScoredFrame[]): DiversityStats | null {
     tiltSpreadDeg,
     coverageSpread,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Live coverage mini-map (shown during capture)
+// ---------------------------------------------------------------------------
+
+const COVERAGE_COLS = 10;
+const COVERAGE_ROWS = 6;
+
+function coverageColor(count: number): string {
+  if (count === 0) return '#1e293b';
+  const t = Math.min(count / 5, 1);
+  if (t < 0.5) {
+    const u = t * 2;
+    return `rgb(${Math.round(239+(251-239)*u)},${Math.round(68+(191-68)*u)},${Math.round(68+(36-68)*u)})`;
+  }
+  const u = (t - 0.5) * 2;
+  return `rgb(${Math.round(251+(16-251)*u)},${Math.round(191+(185-191)*u)},${Math.round(36+(129-36)*u)})`;
+}
+
+function LiveCoverageMap({ grid, pct }: { grid?: number[][] | null; pct?: number }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !grid) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const cw = canvas.width, ch = canvas.height;
+    const pw = cw / COVERAGE_COLS, ph = ch / COVERAGE_ROWS;
+    ctx.clearRect(0, 0, cw, ch);
+    for (let r = 0; r < COVERAGE_ROWS; r++) {
+      for (let c = 0; c < COVERAGE_COLS; c++) {
+        ctx.fillStyle = coverageColor(grid[r]?.[c] ?? 0);
+        ctx.fillRect(c * pw + 0.5, r * ph + 0.5, pw - 1, ph - 1);
+      }
+    }
+  }, [grid]);
+
+  const coverage = pct ?? 0;
+  return (
+    <div className="rounded-xl bg-slate-800 border border-slate-700 p-3 space-y-2">
+      <div className="flex items-center justify-between">
+        <div>
+          <span className="text-xs font-semibold text-slate-300">Frame Coverage</span>
+          <p className="text-[10px] text-slate-500 mt-0.5">All areas must be covered for best accuracy</p>
+        </div>
+        <span className={`text-sm font-bold tabular-nums ${coverage >= 70 ? 'text-emerald-400' : coverage >= 40 ? 'text-yellow-400' : 'text-red-400'}`}>
+          {coverage}%
+        </span>
+      </div>
+      <canvas ref={canvasRef} width={COVERAGE_COLS * 28} height={COVERAGE_ROWS * 28} className="w-full rounded" />
+      <div className="flex items-center gap-3 text-[9px] text-slate-500">
+        <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm inline-block bg-slate-700 border border-slate-600" />Empty</span>
+        <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm inline-block bg-red-500" />1–2 shots</span>
+        <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm inline-block bg-yellow-500" />3–4 shots</span>
+        <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm inline-block bg-emerald-500" />5+ shots</span>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Requirement row — one line per constraint showing pass/fail + hint
+// ---------------------------------------------------------------------------
+
+function RequirementRow({
+  label, ok, hint, score, maxScore, hideWhenOk,
+}: {
+  label: string; ok: boolean; hint?: string | null;
+  score?: number; maxScore?: number; hideWhenOk?: boolean;
+}) {
+  if (hideWhenOk && ok) return null;
+  const barPct = score !== undefined && maxScore ? Math.min(100, (score / maxScore) * 100) : null;
+  return (
+    <div className="flex items-center gap-2 min-h-[22px]">
+      <span className={`w-[74px] text-[11px] font-semibold shrink-0 ${ok ? 'text-emerald-400' : 'text-slate-300'}`}>
+        {ok ? '✓ ' : '· '}{label}
+      </span>
+      {barPct !== null ? (
+        <div className="flex-1 flex items-center gap-2">
+          <div className="flex-1 h-1.5 bg-slate-700 rounded-full overflow-hidden">
+            <div
+              className={`req-bar-fill h-full rounded-full transition-all duration-300 ${ok ? 'bg-emerald-500' : barPct > 50 ? 'bg-yellow-500' : 'bg-red-500'}`}
+              style={{ '--bar-pct': `${barPct}%` } as React.CSSProperties}
+            />
+          </div>
+          {!ok && hint && <span className="text-[10px] text-yellow-300 shrink-0 max-w-[140px] leading-tight">{hint}</span>}
+        </div>
+      ) : (
+        <span className={`flex-1 text-[11px] leading-tight ${ok ? 'text-emerald-300' : 'text-yellow-300 font-medium'}`}>
+          {ok ? 'Good' : (hint ?? '')}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function directionArrow(hint: string | null | undefined): string {
+  if (!hint) return '';
+  const h = hint.toLowerCase();
+  const up = h.includes('up'), down = h.includes('down'), left = h.includes('left'), right = h.includes('right');
+  if (up && left) return '↖ ';
+  if (up && right) return '↗ ';
+  if (down && left) return '↙ ';
+  if (down && right) return '↘ ';
+  if (up) return '↑ ';
+  if (down) return '↓ ';
+  if (left) return '← ';
+  if (right) return '→ ';
+  return '';
 }
 
 // ---------------------------------------------------------------------------
@@ -961,56 +1080,125 @@ export default function GuidedCapture({ ws, boardSettings, onCalibrationSent, on
             </div>
           </div>
 
-          {/* Next hint + chips */}
-          {running && nextHint && (
-            <div className={`rounded-lg border px-3 py-3 flex items-center gap-4 ${checklistComplete ? 'bg-emerald-500/10 border-emerald-500/30' : 'bg-slate-800 border-slate-700'}`}>
-              {!checklistComplete && liveFrame?.next_pose_id && <PoseDiagram poseId={liveFrame.next_pose_id} size="lg" />}
-              <div className="flex-1 min-w-0">
-                <p className={`text-sm font-semibold ${checklistComplete ? 'text-emerald-300' : 'text-slate-200'}`}>
-                  {checklistComplete ? '✓ All poses captured!' : nextHint}
-                </p>
-                {!checklistComplete && liveFrame?.match_status && (
-                  <div className="flex gap-1.5 mt-2 flex-wrap">
-                    {(['position_ok', 'tilt_ok', 'size_ok'] as const).map(key => {
-                      const ok = liveFrame.match_status![key];
-                      const label = key === 'position_ok' ? 'Position' : key === 'tilt_ok' ? 'Tilt' : 'Size';
-                      return (
-                        <span key={key} className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${ok ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300' : 'bg-slate-700/60 border-slate-600 text-slate-400'}`}>
-                          {ok ? '✓' : '·'} {label}
-                        </span>
-                      );
-                    })}
+          {/* ── Guided capture panel ─────────────────────────────── */}
+          {running && (
+            <div className={`rounded-xl border p-4 space-y-3 ${checklistComplete ? 'bg-emerald-500/10 border-emerald-500/30' : 'bg-slate-800 border-slate-700'}`}>
+
+              {/* Header: next pose name + diagram */}
+              {checklistComplete ? (
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-full bg-emerald-500 flex items-center justify-center text-white font-bold text-lg shrink-0">✓</div>
+                  <div>
+                    <p className="text-base font-bold text-emerald-300">All poses captured!</p>
+                    <p className="text-xs text-slate-400 mt-0.5">Press Stop when you are done, then calibrate.</p>
                   </div>
-                )}
-                {!checklistComplete && liveFrame?.match_status?.position_hint && (
-                  <p className="text-sm font-bold text-yellow-300 mt-2">
-                    {liveFrame.match_status.position_hint.includes('up') && !liveFrame.match_status.position_hint.includes('down') ? '↑ ' : ''}
-                    {liveFrame.match_status.position_hint.includes('down') && !liveFrame.match_status.position_hint.includes('up') ? '↓ ' : ''}
-                    {liveFrame.match_status.position_hint.includes('left') && !liveFrame.match_status.position_hint.includes('right') ? '← ' : ''}
-                    {liveFrame.match_status.position_hint.includes('right') && !liveFrame.match_status.position_hint.includes('left') ? '→ ' : ''}
-                    {liveFrame.match_status.position_hint}
-                  </p>
-                )}
-                {!checklistComplete && liveFrame?.match_status?.tilt_hint && liveFrame.match_status.tilt_hint !== 'good' && (
-                  <p className="text-xs text-slate-400 mt-1.5">
-                    Tilt: <span className="text-slate-200 font-semibold">{liveFrame.match_status.tilt_hint}</span>
-                    {typeof liveFrame.match_status.tilt_score === 'number' && (
-                      <span className="text-slate-500"> · {liveFrame.match_status.tilt_score.toFixed(2)}</span>
+                </div>
+              ) : (
+                <div className="flex items-start gap-3">
+                  {liveFrame?.next_pose_id && (
+                    <div className="shrink-0 rounded-lg bg-slate-700/60 border border-slate-600 p-1.5">
+                      <PoseDiagram poseId={liveFrame.next_pose_id} size="lg" />
+                    </div>
+                  )}
+                  <div className="min-w-0">
+                    <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Next shot</p>
+                    <p className="text-sm font-bold text-white leading-snug mt-0.5">
+                      {checklist.find(p => p.id === liveFrame?.next_pose_id)?.name ?? ''}
+                    </p>
+                    <p className="text-xs text-slate-400 mt-1 leading-snug">{nextHint}</p>
+                  </div>
+                </div>
+              )}
+
+              {/* No board detected */}
+              {!checklistComplete && liveFrame && !liveFrame.found && (
+                <div className="flex items-center gap-2 rounded-lg bg-yellow-500/10 border border-yellow-500/30 px-3 py-2">
+                  <span className="text-yellow-400 text-lg shrink-0">◎</span>
+                  <p className="text-sm font-semibold text-yellow-300">Point the calibration chart at the camera</p>
+                </div>
+              )}
+
+              {/* Board found — requirement rows */}
+              {!checklistComplete && liveFrame?.found && liveFrame.match_status && (() => {
+                const ms = liveFrame.match_status;
+                const allOk = ms.position_ok && (!ms.border_hint) && ms.size_ok && ms.tilt_ok && (ms.sharpness_ok !== false);
+                const holdFilling = liveFrame.hold_progress > 0;
+
+                // Determine the single most-important action right now
+                let primaryAction: string | null = null;
+                if (!ms.position_ok && ms.position_hint) {
+                  primaryAction = directionArrow(ms.position_hint) + ms.position_hint;
+                } else if (ms.border_hint) {
+                  primaryAction = ms.border_hint;
+                } else if (!ms.size_ok && ms.size_hint && ms.size_hint !== 'good') {
+                  primaryAction = ms.size_hint;
+                } else if (ms.sharpness_ok === false && ms.sharpness_hint) {
+                  primaryAction = ms.sharpness_hint;
+                } else if (!ms.tilt_ok && ms.tilt_hint && ms.tilt_hint !== 'good') {
+                  primaryAction = ms.tilt_hint;
+                }
+
+                return (
+                  <div className="space-y-2">
+                    {/* Primary action callout */}
+                    {!allOk && primaryAction && (
+                      <div className="rounded-lg bg-blue-500/15 border border-blue-500/30 px-3 py-2">
+                        <p className="text-sm font-bold text-blue-200">{primaryAction}</p>
+                      </div>
                     )}
-                  </p>
-                )}
-                {!checklistComplete && liveFrame?.match_status?.size_hint && liveFrame.match_status.size_hint !== 'good' && (
-                  <p className="text-xs text-slate-500 mt-1">
-                    Distance guide: <span className="text-slate-300 font-semibold">{liveFrame.match_status.size_hint}</span>
-                    {typeof liveFrame.match_status.size_score === 'number' && (
-                      <span className="text-slate-500"> · size {liveFrame.match_status.size_score.toFixed(3)}</span>
+
+                    {/* Requirement rows */}
+                    <div className="rounded-lg bg-slate-900/50 border border-slate-700/50 px-3 py-2.5 space-y-1.5">
+                      <RequirementRow
+                        label="Position"
+                        ok={ms.position_ok && !ms.border_hint}
+                        hint={ms.border_hint ?? (ms.position_ok ? null : ms.position_hint)}
+                      />
+                      <RequirementRow
+                        label="Distance"
+                        ok={ms.size_ok}
+                        hint={ms.size_hint !== 'good' ? ms.size_hint : null}
+                        score={ms.size_score}
+                        maxScore={0.5}
+                      />
+                      <RequirementRow
+                        label="Sharpness"
+                        ok={ms.sharpness_ok !== false}
+                        hint={ms.sharpness_hint !== 'good' && ms.sharpness_hint !== 'Sharp' ? ms.sharpness_hint : null}
+                        score={ms.sharpness_score}
+                        maxScore={300}
+                      />
+                      <RequirementRow
+                        label="Tilt"
+                        ok={ms.tilt_ok}
+                        hint={ms.tilt_hint !== 'good' ? ms.tilt_hint : null}
+                      />
+                    </div>
+
+                    {/* Hold-still confirmation */}
+                    {holdFilling && (
+                      <div className="flex items-center gap-2 rounded-lg bg-emerald-500/10 border border-emerald-500/30 px-3 py-2">
+                        <div className="w-4 h-4 border-2 border-emerald-400 border-t-transparent rounded-full animate-spin shrink-0" />
+                        <p className="text-sm font-semibold text-emerald-300">
+                          Hold still — {Math.round(liveFrame.hold_progress * 100)}% — capturing…
+                        </p>
+                      </div>
                     )}
-                  </p>
-                )}
-                {!checklistComplete && liveFrame && !liveFrame.found && <p className="text-xs text-slate-500 mt-1.5">Point the chart at the camera</p>}
-                {checklistComplete && <p className="text-xs text-slate-400 mt-0.5">Press Stop to move to next focal length</p>}
-              </div>
+                    {allOk && !holdFilling && (
+                      <div className="flex items-center gap-2 rounded-lg bg-emerald-500/10 border border-emerald-500/30 px-3 py-2">
+                        <span className="text-emerald-400 font-bold shrink-0">✓</span>
+                        <p className="text-sm font-semibold text-emerald-300">All good — press Capture or hold still</p>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
+          )}
+
+          {/* Live coverage map — shown only while capturing */}
+          {running && liveFrame && (
+            <LiveCoverageMap grid={liveFrame.coverage_grid} pct={liveFrame.frame_coverage_pct} />
           )}
 
           {/* Post-FL-capture hint */}

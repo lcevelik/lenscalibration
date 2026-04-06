@@ -57,56 +57,62 @@ REQUIRED_POSES: list[dict] = [
     {
         "id":        "corner_tl",
         "name":      "Top-left corner",
-        "hint":      "Move the board to the top-left corner of the frame",
+        "hint":      "Move the board to the very top-left corner — get it as close to the corner of the image as possible",
         "region":    [0],
         "tilt_max":  1.00,
         "tilt_min":  0.00,
         "size_min":  0.06,
+        "border_req": {"left": 0.18, "top": 0.18},
     },
     {
         "id":        "corner_tr",
         "name":      "Top-right corner",
-        "hint":      "Move the board to the top-right corner of the frame",
+        "hint":      "Move the board to the very top-right corner — get it as close to the corner of the image as possible",
         "region":    [2],
         "tilt_max":  1.00,
         "tilt_min":  0.00,
         "size_min":  0.06,
+        "border_req": {"right": 0.18, "top": 0.18},
     },
     {
         "id":        "corner_bl",
         "name":      "Bottom-left corner",
-        "hint":      "Move the board to the bottom-left corner of the frame",
+        "hint":      "Move the board to the very bottom-left corner — get it as close to the corner of the image as possible",
         "region":    [6],
         "tilt_max":  1.00,
         "tilt_min":  0.00,
         "size_min":  0.06,
+        "border_req": {"left": 0.18, "bottom": 0.18},
     },
     {
         "id":        "corner_br",
         "name":      "Bottom-right corner",
-        "hint":      "Move the board to the bottom-right corner of the frame",
+        "hint":      "Move the board to the very bottom-right corner — get it as close to the corner of the image as possible",
         "region":    [8],
         "tilt_max":  1.00,
         "tilt_min":  0.00,
         "size_min":  0.06,
+        "border_req": {"right": 0.18, "bottom": 0.18},
     },
     {
         "id":        "left_edge",
         "name":      "Left edge",
-        "hint":      "Move the board to the centre-left of the frame (halfway up, left side)",
+        "hint":      "Move the board to the left side of the frame — slide it until it almost touches the left edge",
         "region":    [3],
         "tilt_max":  1.00,
         "tilt_min":  0.00,
         "size_min":  0.06,
+        "border_req": {"left": 0.18},
     },
     {
         "id":        "right_edge",
         "name":      "Right edge",
-        "hint":      "Move the board to the centre-right of the frame (halfway up, right side)",
+        "hint":      "Move the board to the right side of the frame — slide it until it almost touches the right edge",
         "region":    [5],
         "tilt_max":  1.00,
         "tilt_min":  0.00,
         "size_min":  0.06,
+        "border_req": {"right": 0.18},
     },
     {
         "id":        "close_up",
@@ -167,56 +173,62 @@ FIXED_MOUNT_REQUIRED_POSES: list[dict] = [
     {
         "id":       "corner_tl",
         "name":     "Pan to top-left",
-        "hint":     "Pan and tilt the camera until the chart appears in the top-left of the frame",
+        "hint":     "Pan and tilt the camera until the chart is in the very top-left corner of the frame",
         "region":   [0],
         "tilt_max": 1.00,
         "tilt_min": 0.00,
         "size_min": 0.04,
+        "border_req": {"left": 0.20, "top": 0.20},
     },
     {
         "id":       "corner_tr",
         "name":     "Pan to top-right",
-        "hint":     "Pan and tilt the camera until the chart appears in the top-right of the frame",
+        "hint":     "Pan and tilt the camera until the chart is in the very top-right corner of the frame",
         "region":   [2],
         "tilt_max": 1.00,
         "tilt_min": 0.00,
         "size_min": 0.04,
+        "border_req": {"right": 0.20, "top": 0.20},
     },
     {
         "id":       "corner_bl",
         "name":     "Pan to bottom-left",
-        "hint":     "Pan and tilt the camera until the chart appears in the bottom-left of the frame",
+        "hint":     "Pan and tilt the camera until the chart is in the very bottom-left corner of the frame",
         "region":   [6],
         "tilt_max": 1.00,
         "tilt_min": 0.00,
         "size_min": 0.04,
+        "border_req": {"left": 0.20, "bottom": 0.20},
     },
     {
         "id":       "corner_br",
         "name":     "Pan to bottom-right",
-        "hint":     "Pan and tilt the camera until the chart appears in the bottom-right of the frame",
+        "hint":     "Pan and tilt the camera until the chart is in the very bottom-right corner of the frame",
         "region":   [8],
         "tilt_max": 1.00,
         "tilt_min": 0.00,
         "size_min": 0.04,
+        "border_req": {"right": 0.20, "bottom": 0.20},
     },
     {
         "id":       "left_edge",
         "name":     "Pan to left edge",
-        "hint":     "Pan the camera so the chart appears in the centre-left of the frame",
+        "hint":     "Pan the camera until the chart almost touches the left side of the frame",
         "region":   [3],
         "tilt_max": 1.00,
         "tilt_min": 0.00,
         "size_min": 0.04,
+        "border_req": {"left": 0.20},
     },
     {
         "id":       "right_edge",
         "name":     "Pan to right edge",
-        "hint":     "Pan the camera so the chart appears in the centre-right of the frame",
+        "hint":     "Pan the camera until the chart almost touches the right side of the frame",
         "region":   [5],
         "tilt_max": 1.00,
         "tilt_min": 0.00,
         "size_min": 0.04,
+        "border_req": {"right": 0.20},
     },
     {
         "id":       "offcenter_tilt",
@@ -460,12 +472,22 @@ def compute_pose_metrics(
     h_ratio = min(left_h, right_h) / max(left_h, right_h, 1e-6)
     tilt_score = float(1.0 - min(w_ratio, h_ratio))
 
+    # Distance from each image boundary (0.0 = touching, 1.0 = at opposite edge)
+    border_left   = round(float(pts[:, 0].min()) / iw, 3)
+    border_right  = round(float(iw - pts[:, 0].max()) / iw, 3)
+    border_top    = round(float(pts[:, 1].min()) / ih, 3)
+    border_bottom = round(float(ih - pts[:, 1].max()) / ih, 3)
+
     return {
         "region":        region,
         "cx":            round(cx, 3),
         "cy":            round(cy, 3),
         "apparent_size": round(apparent_size, 4),
         "tilt_score":    round(tilt_score, 3),
+        "border_left":   max(0.0, border_left),
+        "border_right":  max(0.0, border_right),
+        "border_top":    max(0.0, border_top),
+        "border_bottom": max(0.0, border_bottom),
     }
 
 
@@ -514,12 +536,21 @@ def compute_pose_metrics_sparse(
     h_ratio = min(left_h, rgt_h) / max(left_h, rgt_h, 1e-6)
     tilt_score = float(1.0 - min(w_ratio, h_ratio))
 
+    border_left   = round(max(0.0, float(pts[:, 0].min()) / iw), 3)
+    border_right  = round(max(0.0, float(iw - pts[:, 0].max()) / iw), 3)
+    border_top    = round(max(0.0, float(pts[:, 1].min()) / ih), 3)
+    border_bottom = round(max(0.0, float(ih - pts[:, 1].max()) / ih), 3)
+
     return {
         "region":        region,
         "cx":            round(cx, 3),
         "cy":            round(cy, 3),
         "apparent_size": round(apparent_size, 4),
         "tilt_score":    round(tilt_score, 3),
+        "border_left":   border_left,
+        "border_right":  border_right,
+        "border_top":    border_top,
+        "border_bottom": border_bottom,
     }
 
 
@@ -536,7 +567,28 @@ def _pose_matches(metrics: dict, pose_def: dict) -> bool:
         return False
     if pose_def["region"] is not None and metrics["region"] not in pose_def["region"]:
         return False
+    # Border proximity check: only applies when region is constrained (not tele/any-region modes)
+    if pose_def.get("region") is not None and "border_req" in pose_def:
+        for side, threshold in pose_def["border_req"].items():
+            if metrics.get(f"border_{side}", 1.0) > threshold:
+                return False
     return True
+
+
+def compute_border_hint(metrics: dict, pose_def: dict) -> str | None:
+    """Return a plain-language hint if board border requirements are not met, else None."""
+    if pose_def.get("region") is None or "border_req" not in pose_def:
+        return None
+    failing = []
+    for side, threshold in pose_def["border_req"].items():
+        val = metrics.get(f"border_{side}", 1.0)
+        if val > threshold:
+            pct = int(val * 100)
+            qualifier = "much closer to" if pct > 35 else "a bit closer to"
+            failing.append(f"{qualifier} the {side} edge")
+    if not failing:
+        return None
+    return "Slide the board " + " & ".join(failing)
 
 
 def match_unsatisfied_pose(

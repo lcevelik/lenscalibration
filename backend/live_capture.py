@@ -43,7 +43,7 @@ _executor = ThreadPoolExecutor(max_workers=max(4, (os.cpu_count() or 4)))
 
 from capture_device import open_capture, read_actual_size, read_actual_fps
 from frame_scorer import score_frame_array
-from pose_advisor import REQUIRED_POSES, evaluate_checklist, get_required_poses, match_unsatisfied_pose, _pose_matches
+from pose_advisor import REQUIRED_POSES, evaluate_checklist, get_required_poses, match_unsatisfied_pose, _pose_matches, compute_border_hint
 
 STREAM_W      = 640    # resolution used for scoring & canvas coordinate space
 STREAM_H      = 360
@@ -54,6 +54,9 @@ PREVIEW_FPS   = 15     # target fps for the lightweight preview stream
 CAPTURE_FPS   = 8      # target fps for the live-capture loop (scoring is expensive)
 PREVIEW_W     = 320    # lower resolution for the idle preview stream (no detection)
 PREVIEW_H     = 180    # → 4× less JPEG data, faster encode/transmit/decode
+AUTO_CAPTURE_MIN_SHARPNESS = 80   # Laplacian variance floor for auto-capture (Level 1)
+COVERAGE_COLS = 10                # coverage grid columns (sent live to frontend)
+COVERAGE_ROWS = 6                 # coverage grid rows
 
 
 def _safe_score_frame_array(image: np.ndarray, checkerboard_size: tuple, fast: bool = False) -> dict:
@@ -179,8 +182,8 @@ def _smooth_pose_metrics(prev: Optional[dict], curr: dict, alpha: float = 0.35) 
     if prev is None:
         return dict(curr)
 
-    def ema(key: str) -> float:
-        return (1.0 - alpha) * float(prev.get(key, curr[key])) + alpha * float(curr[key])
+    def ema(key: str, default: float = 0.0) -> float:
+        return (1.0 - alpha) * float(prev.get(key, curr.get(key, default))) + alpha * float(curr.get(key, default))
 
     cx = max(0.0, min(0.999, ema("cx")))
     cy = max(0.0, min(0.999, ema("cy")))
@@ -189,11 +192,15 @@ def _smooth_pose_metrics(prev: Optional[dict], curr: dict, alpha: float = 0.35) 
     region = gy * 3 + gx
 
     return {
-        "region": region,
-        "cx": round(cx, 3),
-        "cy": round(cy, 3),
+        "region":        region,
+        "cx":            round(cx, 3),
+        "cy":            round(cy, 3),
         "apparent_size": round(ema("apparent_size"), 4),
-        "tilt_score": round(ema("tilt_score"), 3),
+        "tilt_score":    round(ema("tilt_score"), 3),
+        "border_left":   round(max(0.0, ema("border_left", 0.5)), 3),
+        "border_right":  round(max(0.0, ema("border_right", 0.5)), 3),
+        "border_top":    round(max(0.0, ema("border_top", 0.5)), 3),
+        "border_bottom": round(max(0.0, ema("border_bottom", 0.5)), 3),
     }
 
 
@@ -265,6 +272,9 @@ async def run_live_capture(
     }))
 
     captured_frames: list[dict] = []
+
+    # Level 3: running coverage grid (native-resolution corners accumulated per frame)
+    coverage_grid: list[list[int]] = [[0] * COVERAGE_COLS for _ in range(COVERAGE_ROWS)]
 
     # Hold-still state — board must match a pose for HOLD_SECONDS before auto-capture
     hold_pose_id:  Optional[str]   = None
@@ -393,7 +403,9 @@ async def run_live_capture(
                     hold_start   = None
                     hold_miss    = 0
 
-            do_capture = force or ((not manual_only) and hold_progress >= 1.0 and matching_pose is not None)
+            # Level 1: gate auto-capture on sharpness; manual force always allowed
+            auto_sharpness_ok = result["sharpness"] >= AUTO_CAPTURE_MIN_SHARPNESS
+            do_capture = force or ((not manual_only) and hold_progress >= 1.0 and matching_pose is not None and auto_sharpness_ok)
 
             if do_capture:
                 # Use nanosecond timestamp to avoid collisions when two captures
@@ -448,6 +460,13 @@ async def run_live_capture(
                     "image_height": capture_orig_h,
                     "captured_pose_id": matching_pose if matching_pose != "bonus_any" else None,
                 })
+                # Level 3: update running coverage grid from native-resolution corners
+                if capture_orig_w > 0 and capture_orig_h > 0:
+                    for cx_n, cy_n in native_result.get("corners", []):
+                        col = min(COVERAGE_COLS - 1, int(cx_n / capture_orig_w * COVERAGE_COLS))
+                        row = min(COVERAGE_ROWS - 1, int(cy_n / capture_orig_h * COVERAGE_ROWS))
+                        coverage_grid[row][col] += 1
+
                 print(f"[live_capture] captured frame: quality={native_result['quality']}, sharpness={native_result['sharpness']}, coverage={native_result['coverage']:.2%}, pose={matching_pose} (flushed={ret_fresh})")
                 # Reset hold so next pose can start fresh
                 hold_pose_id = None
@@ -493,15 +512,15 @@ async def run_live_capture(
                         m = pose_metrics_live
                         tilt_hint = "good"
                         if m["tilt_score"] < next_def["tilt_min"]:
-                            tilt_hint = "Tilt more"
+                            tilt_hint = "Tilt more — rotate the board left/right or tip it toward you"
                         elif m["tilt_score"] > next_def["tilt_max"]:
-                            tilt_hint = "Tilt less"
+                            tilt_hint = "Tilt less — face the board more directly at the camera"
 
                         size_hint = "good"
                         if m["apparent_size"] > 0.85:
-                            size_hint = "Move back — chart too large"
+                            size_hint = "Move back — chart is too large in frame"
                         elif m["apparent_size"] < next_def["size_min"]:
-                            size_hint = "Move closer"
+                            size_hint = "Move closer — chart is too small"
 
                         position_ok = (next_def["region"] is None or m["region"] in next_def["region"])
                         position_hint = None
@@ -523,45 +542,70 @@ async def run_live_capture(
                                 dirs.append("up")
                             if dirs:
                                 position_hint = "Move " + " & ".join(dirs)
+
+                        # Level 2: border proximity hint
+                        border_hint = compute_border_hint(m, next_def)
+
+                        # Level 1: sharpness feedback
+                        sharp = result["sharpness"]
+                        sharpness_ok = sharp >= AUTO_CAPTURE_MIN_SHARPNESS
+                        if sharp >= 200:
+                            sharpness_hint = "Sharp"
+                        elif sharp >= AUTO_CAPTURE_MIN_SHARPNESS:
+                            sharpness_hint = "good"
+                        elif sharp >= 30:
+                            sharpness_hint = "Hold very still — slightly blurry"
+                        else:
+                            sharpness_hint = "Very blurry — hold still or check focus"
+
                         match_status = {
-                            "position_ok":   position_ok,
-                            "position_hint": position_hint,
-                            "tilt_ok":     next_def["tilt_min"] <= m["tilt_score"] <= next_def["tilt_max"],
-                            "size_ok":     m["apparent_size"] >= next_def["size_min"],
-                            "tilt_score":  m["tilt_score"],
-                            "tilt_hint":   tilt_hint,
-                            "size_score":  m["apparent_size"],
-                            "size_hint":   size_hint,
+                            "position_ok":    position_ok,
+                            "position_hint":  position_hint,
+                            "tilt_ok":        next_def["tilt_min"] <= m["tilt_score"] <= next_def["tilt_max"],
+                            "size_ok":        m["apparent_size"] >= next_def["size_min"],
+                            "tilt_score":     m["tilt_score"],
+                            "tilt_hint":      tilt_hint,
+                            "size_score":     m["apparent_size"],
+                            "size_hint":      size_hint,
+                            "border_hint":    border_hint,
+                            "sharpness_ok":   sharpness_ok,
+                            "sharpness_score": round(sharp, 1),
+                            "sharpness_hint": sharpness_hint,
                         }
 
             msg_text = "Board detected" if result["found"] else "No board detected"
             if result["found"]:
                 msg_text += f" — {result['quality']}"
 
+            covered_cells = sum(1 for row in coverage_grid for c in row if c > 0)
+            frame_coverage_pct = round(covered_cells / (COVERAGE_COLS * COVERAGE_ROWS) * 100, 1)
+
             await websocket.send_text(json.dumps({
-                "action":           "live_frame",
-                "frame":            frame_b64,
-                "found":            result["found"],
-                "detection_type":   result.get("detection_type"),
-                "corners":          stream_corners,
-                "quality":          result["quality"],
-                "sharpness":        result["sharpness"],
-                "coverage":         result["coverage"],
-                "auto_captured":    auto_captured,
-                "frame_count":      len(captured_frames),
-                "checklist":        checklist_info["checklist"],
-                "satisfied_count":  checklist_info["satisfied_count"],
-                "total":            checklist_info["total"],
-                "complete":         checklist_info["complete"],
-                "next_hint":        display_next_hint,
-                "next_pose_id":     display_pose_id,
-                "matching_pose_id": matching_pose,
-                "hold_progress":    round(hold_progress, 3),
-                "message":          msg_text,
-                "image_width":      STREAM_W,
-                "image_height":     STREAM_H,
-                "next_pose_reqs":   next_pose_reqs,
-                "match_status":     match_status,
+                "action":               "live_frame",
+                "frame":                frame_b64,
+                "found":                result["found"],
+                "detection_type":       result.get("detection_type"),
+                "corners":              stream_corners,
+                "quality":              result["quality"],
+                "sharpness":            result["sharpness"],
+                "coverage":             result["coverage"],
+                "auto_captured":        auto_captured,
+                "frame_count":          len(captured_frames),
+                "checklist":            checklist_info["checklist"],
+                "satisfied_count":      checklist_info["satisfied_count"],
+                "total":                checklist_info["total"],
+                "complete":             checklist_info["complete"],
+                "next_hint":            display_next_hint,
+                "next_pose_id":         display_pose_id,
+                "matching_pose_id":     matching_pose,
+                "hold_progress":        round(hold_progress, 3),
+                "message":              msg_text,
+                "image_width":          STREAM_W,
+                "image_height":         STREAM_H,
+                "next_pose_reqs":       next_pose_reqs,
+                "match_status":         match_status,
+                "coverage_grid":        coverage_grid,
+                "frame_coverage_pct":   frame_coverage_pct,
             }))
 
             # Pace to CAPTURE_FPS; allow early exit on stop
