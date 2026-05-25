@@ -2,6 +2,8 @@ import numpy as np
 import cv2
 from collections import Counter
 
+from calib_helpers import make_objp, confidence, is_implausible_solution, run_constrained_fallback
+
 
 def _run_calibration_pass(
     obj_points: list,
@@ -31,56 +33,8 @@ def _run_calibration_pass(
     return cv2.calibrateCamera(obj_points, img_points, calib_size, cam0, dc0, flags=calib_flags)
 
 
-def _run_constrained_fallback_pass(obj_points: list, img_points: list, calib_size: tuple):
-    """Fallback solve with stronger regularization for tele / low-parallax sets."""
-    w, h = calib_size
-    cam0 = np.array(
-        [[max(w, h), 0.0, w / 2.0],
-         [0.0, max(w, h), h / 2.0],
-         [0.0, 0.0, 1.0]],
-        dtype=np.float64,
-    )
-    dc0 = np.zeros((5, 1), dtype=np.float64)
-    flags = getattr(cv2, "CALIB_FIX_SKEW", 0)
-    flags |= (
-        cv2.CALIB_USE_INTRINSIC_GUESS
-        | cv2.CALIB_FIX_K2
-        | cv2.CALIB_FIX_K3
-        | cv2.CALIB_ZERO_TANGENT_DIST
-        | cv2.CALIB_FIX_ASPECT_RATIO
-    )
-    return cv2.calibrateCamera(obj_points, img_points, calib_size, cam0, dc0, flags=flags)
-
-
-def _is_implausible_solution(camera_matrix: np.ndarray, dist_coeffs: np.ndarray, calib_size: tuple) -> bool:
-    w, h = calib_size
-    fx = float(camera_matrix[0, 0])
-    fy = float(camera_matrix[1, 1])
-    cx = float(camera_matrix[0, 2])
-    cy = float(camera_matrix[1, 2])
-    dc = dist_coeffs.flatten()
-    k1 = float(dc[0]) if len(dc) > 0 else 0.0
-    k2 = float(dc[1]) if len(dc) > 1 else 0.0
-    p1 = float(dc[2]) if len(dc) > 2 else 0.0
-    p2 = float(dc[3]) if len(dc) > 3 else 0.0
-
-    if not np.isfinite([fx, fy, cx, cy, k1, k2, p1, p2]).all():
-        return True
-    if fx < 0.2 * w or fy < 0.2 * h:
-        return True
-    if fx > 20.0 * w or fy > 20.0 * h:
-        return True
-    # Principal point must lie within ±75 % of the image half-dimension from
-    # the image centre.  Testing against absolute pixel values (old check:
-    # abs(cx) > 3*w) measures from the top-left corner and misses cases like
-    # cy = -314 for a 1080 px tall frame.
-    if abs(cx - w / 2) > 0.75 * w or abs(cy - h / 2) > 0.75 * h:
-        return True
-    if abs(k1) > 2.0 or abs(k2) > 2.0:
-        return True
-    if abs(p1) > 0.2 or abs(p2) > 0.2:
-        return True
-    return False
+# _run_constrained_fallback_pass, _is_implausible_solution, _make_objp,
+# _confidence → imported from calib_helpers
 
 
 def _compute_per_image_errors(
@@ -176,7 +130,7 @@ def run_calibration(
     # --- Object points (3-D grid, z = 0) ------------------------------------
     # Full-board template; partial frames get their own per-frame objp via
     # the partial_grid_size field written by frame_scorer.
-    full_objp = _make_objp(board_cols, board_rows, square_size_mm)
+    full_objp = make_objp(board_cols, board_rows, square_size_mm)
 
     obj_points = []
     img_points = []
@@ -202,7 +156,7 @@ def run_calibration(
             p_cols, p_rows = int(partial_size[0]), int(partial_size[1])
             if corners.shape[0] != p_cols * p_rows:
                 continue
-            obj = _make_objp(p_cols, p_rows, square_size_mm)
+            obj = make_objp(p_cols, p_rows, square_size_mm)
         else:
             if corners.shape[0] != board_rows * board_cols:
                 continue
@@ -227,12 +181,12 @@ def run_calibration(
     except cv2.error as e:
         return _error(f"OpenCV calibration failed: {e}", squeeze_ratio)
 
-    if _is_implausible_solution(camera_matrix, dist_coeffs, calib_size):
+    if is_implausible_solution(camera_matrix, dist_coeffs, calib_size):
         try:
-            rms_fb, cm_fb, dc_fb, rv_fb, tv_fb = _run_constrained_fallback_pass(
+            rms_fb, cm_fb, dc_fb, rv_fb, tv_fb = run_constrained_fallback(
                 obj_points, img_points, calib_size
             )
-            if not _is_implausible_solution(cm_fb, dc_fb, calib_size):
+            if not is_implausible_solution(cm_fb, dc_fb, calib_size):
                 rms, camera_matrix, dist_coeffs, rvecs, tvecs = rms_fb, cm_fb, dc_fb, rv_fb, tv_fb
                 solver_warning = (
                     "Used constrained tele fallback solver (k2/k3 fixed, tangential fixed). "
@@ -318,7 +272,7 @@ def run_calibration(
             pass
 
     # --- Confidence ---------------------------------------------------------
-    confidence = _confidence(rms, sparse=sparse_mode)
+    conf = confidence(rms, sparse=sparse_mode)
 
     return {
         "rms": round(rms, 4),
@@ -327,7 +281,7 @@ def run_calibration(
         "fov_x": round(fov_x, 4),
         "fov_y": round(fov_y, 4),
         "per_image_errors": per_image_errors,
-        "confidence": confidence,
+        "confidence": conf,
         "used_frames": len(obj_points),
         "skipped_frames": skipped,
         "detection_type": selected_det,
@@ -340,26 +294,6 @@ def run_calibration(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _make_objp(cols: int, rows: int, square_size_mm: float) -> np.ndarray:
-    """Build a planar (z=0) object-point array for a cols×rows inner-corner grid."""
-    pts = np.zeros((rows * cols, 3), dtype=np.float32)
-    pts[:, :2] = np.mgrid[0:cols, 0:rows].T.reshape(-1, 2) * square_size_mm
-    return pts
-
-
-def _confidence(rms: float, sparse: bool = False) -> str:
-    if sparse:
-        if rms < 0.7:  return "excellent"
-        if rms < 1.5:  return "good"
-        if rms < 3.0:  return "marginal"
-        return "poor"
-    else:
-        if rms < 0.3:  return "excellent"
-        if rms < 0.5:  return "good"
-        if rms < 1.0:  return "marginal"
-        return "poor"
-
 
 def _error(reason: str, squeeze_ratio: float = 1.0) -> dict:
     return {

@@ -85,7 +85,7 @@ def apply_nodal_preset(
     for r in fl_results:
         fl  = r["focal_length_mm"]
         key = str(int(fl)) if fl == int(fl) else f"{fl:.1f}"
-        nodal_offsets_mm[key] = tz(fl)
+        nodal_offsets_mm[key] = {"tx": 0.0, "ty": 0.0, "tz": tz(fl)}
 
     if fl_interpolated:
         for r in fl_interpolated:
@@ -513,6 +513,8 @@ def export_ue5_ulens_zoom(
 
                 k1, k2, p1, p2, k3 = _di(0), _di(1), _di(2), _di(3), _di(4)
                 nz = float(r.get("nodal_offset_z_mm", 0.0))
+                nx = float(r.get("nodal_offset_x_mm", 0.0))
+                ny = float(r.get("nodal_offset_y_mm", 0.0))
             else:
                 cm = np.array(r["camera_matrix"], dtype=np.float64)
                 dc_arr = np.array(r["dist_coeffs"], dtype=np.float64).flatten()
@@ -526,11 +528,17 @@ def export_ue5_ulens_zoom(
 
                 k1, k2, p1, p2, k3 = _d(0), _d(1), _d(2), _d(3), _d(4)
                 _nz_key = str(int(fl_mm)) if fl_mm == int(fl_mm) else f"{fl_mm:.1f}"
-                nz = float(nodal_offsets_mm.get(_nz_key, 0.0))
+                _no = nodal_offsets_mm.get(_nz_key, {})
+                if isinstance(_no, dict):
+                    nz = float(_no.get("tz", 0.0))
+                    nx = float(_no.get("tx", 0.0))
+                    ny = float(_no.get("ty", 0.0))
+                else:
+                    nz = float(_no)
+                    nx, ny = 0.0, 0.0
 
-            fl_rows.append([focus_enc, ze(fl_mm), fx_n, fy_n])
-            ic_rows.append([focus_enc, ze(fl_mm), cx_n, cy_n])
-            nd_rows.append([focus_enc, ze(fl_mm), 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, nz])
+            # Nodal offset row: Qx Qy Qz Qw Tx Ty Tz
+            nd_rows.append([focus_enc, ze(fl_mm), 0.0, 0.0, 0.0, 1.0, nx, ny, nz])
             dist_rows.append([focus_enc, ze(fl_mm), k1, k2, k3, p1, p2])
 
         zoom_lens_info: dict = {

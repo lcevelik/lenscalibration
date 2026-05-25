@@ -119,6 +119,97 @@ function filename(p: string) {
 }
 
 // ---------------------------------------------------------------------------
+// Distortion curve SVG chart
+// ---------------------------------------------------------------------------
+
+function DistortionCurve({ k1, k2, k3 }: { k1: number; k2: number; k3: number }) {
+  const W = 320, H = 180, PAD = 32;
+  const n = 100;
+  const rMax = 1.5; // normalised radius (1.0 = corner)
+  const dr = rMax / n;
+
+  // Compute r'/r for each r
+  const points: [number, number][] = [];
+  let yMin = Infinity, yMax = -Infinity;
+  for (let i = 0; i <= n; i++) {
+    const r = i * dr;
+    const r2 = r * r;
+    const r4 = r2 * r2;
+    const r6 = r4 * r2;
+    const rPrime = r === 0 ? 0 : r * (1 + k1 * r2 + k2 * r4 + k3 * r6);
+    const ratio = r === 0 ? 1 : rPrime / r;
+    points.push([r, ratio]);
+    if (ratio < yMin) yMin = ratio;
+    if (ratio > yMax) yMax = ratio;
+  }
+
+  // Add margin to y range
+  const yPad = (yMax - yMin) * 0.15 || 0.05;
+  yMin -= yPad;
+  yMax += yPad;
+
+  const xScale = (v: number) => PAD + (v / rMax) * (W - 2 * PAD);
+  const yScale = (v: number) => H - PAD - ((v - yMin) / (yMax - yMin)) * (H - 2 * PAD);
+
+  const pathD = points.map(([r, y], i) =>
+    `${i === 0 ? 'M' : 'L'} ${xScale(r).toFixed(1)} ${yScale(y).toFixed(1)}`
+  ).join(' ');
+
+  // Undistorted reference line (r'/r = 1)
+  const refY = yScale(1);
+
+  // Barrel/pincushion label
+  const midRatio = points[Math.floor(n * 0.5)]?.[1] ?? 1;
+  const distType = midRatio < 0.998 ? 'barrel' : midRatio > 1.002 ? 'pincushion' : 'minimal';
+
+  return (
+    <div className="bg-slate-900 rounded-lg p-3">
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-xs text-slate-400 font-semibold uppercase tracking-wider">
+          Radial Distortion Profile
+        </span>
+        <span className={`text-[10px] font-semibold px-2 py-0.5 rounded ${
+          distType === 'barrel' ? 'bg-blue-500/15 text-blue-400' :
+          distType === 'pincushion' ? 'bg-yellow-500/15 text-yellow-400' :
+          'bg-slate-700 text-slate-400'
+        }`}>
+          {distType}
+        </span>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ maxHeight: 180 }}>
+        {/* Grid lines */}
+        {[0, 0.5, 1.0, 1.5].map(v => v <= rMax && (
+          <line key={v} x1={xScale(v)} y1={PAD} x2={xScale(v)} y2={H - PAD}
+            stroke="#334155" strokeWidth={0.5} />
+        ))}
+        {/* Undistorted reference */}
+        <line x1={PAD} y1={refY} x2={W - PAD} y2={refY}
+          stroke="#475569" strokeWidth={1} strokeDasharray="4 3" />
+        {/* Distortion curve */}
+        <path d={pathD} fill="none" stroke="#60a5fa" strokeWidth={2} />
+        {/* Axes */}
+        <line x1={PAD} y1={H - PAD} x2={W - PAD} y2={H - PAD} stroke="#64748b" strokeWidth={1} />
+        <line x1={PAD} y1={PAD} x2={PAD} y2={H - PAD} stroke="#64748b" strokeWidth={1} />
+        {/* X labels */}
+        <text x={xScale(0)} y={H - 8} textAnchor="middle" fill="#64748b" fontSize={9}>0</text>
+        <text x={xScale(1)} y={H - 8} textAnchor="middle" fill="#64748b" fontSize={9}>1.0</text>
+        {/* Y labels */}
+        <text x={PAD - 4} y={yScale(1) + 3} textAnchor="end" fill="#64748b" fontSize={9}>1.0</text>
+        <text x={PAD - 4} y={yScale(yMin) + 3} textAnchor="end" fill="#64748b" fontSize={9}>{yMin.toFixed(3)}</text>
+        <text x={PAD - 4} y={yScale(yMax) + 3} textAnchor="end" fill="#64748b" fontSize={9}>{yMax.toFixed(3)}</text>
+        {/* Axis titles */}
+        <text x={W / 2} y={H - 1} textAnchor="middle" fill="#64748b" fontSize={9}>r (normalised radius)</text>
+        <text x={6} y={H / 2} textAnchor="middle" fill="#64748b" fontSize={9}
+          transform={`rotate(-90, 6, ${H / 2})`}>r′/r</text>
+      </svg>
+      <p className="text-[10px] text-slate-500 mt-1">
+        r′/r = 1 means no distortion. Below 1 = barrel; above 1 = pincushion.
+      </p>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Main component
 // ---------------------------------------------------------------------------
 
@@ -307,6 +398,15 @@ export default function ResultPanel({ result, imageSize, ws }: Props) {
           })}
         </div>
       </div>
+
+      {/* Distortion curve */}
+      {dc.length >= 3 && (
+        <DistortionCurve
+          k1={dc[0] ?? 0}
+          k2={dc[1] ?? 0}
+          k3={dc[4] ?? 0}
+        />
+      )}
 
       {/* Per-image error chart */}
       {errors.length > 0 && (

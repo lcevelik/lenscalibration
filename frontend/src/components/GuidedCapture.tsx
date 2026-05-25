@@ -71,6 +71,7 @@ export interface ZoomFlResult {
   camera_matrix: number[][]; optical_center_world: [number, number, number];
   used_frames: number; per_image_errors: Array<{ path: string; error: number; outlier: boolean }>;
   confidence: string; error?: string | null;
+  pose_only?: boolean; warning?: string;
 }
 
 export interface ZoomFlInterpolated {
@@ -79,14 +80,22 @@ export interface ZoomFlInterpolated {
   dist_coeffs: number[];
   camera_matrix: number[][];
   nodal_offset_z_mm: number;
+  nodal_offset_x_mm?: number;
+  nodal_offset_y_mm?: number;
   interpolated: true;
+  extrapolated?: boolean;
 }
+
+export interface NodalEntry { tx: number; ty: number; tz: number }
 
 export interface ZoomCalibResult {
   success: boolean; error: string | null;
-  fl_results: ZoomFlResult[]; nodal_offsets_mm: Record<string, number>;
+  fl_results: ZoomFlResult[]; nodal_offsets_mm: Record<string, NodalEntry | number>;
   fl_interpolated?: ZoomFlInterpolated[];
   image_size?: [number, number];
+  nodal_model?: { model: string; coeffs: number[]; fl_min: number; fl_max: number; fit_rms_mm: number } | null;
+  squeeze_ratio?: number;
+  lens_type?: string;
 }
 
 interface Props {
@@ -1443,7 +1452,8 @@ export default function GuidedCapture({ ws, boardSettings, onCalibrationSent, on
               </thead>
               <tbody className="divide-y divide-slate-700/50">
                 {zoomResult.fl_results.map(r => {
-                  const nz = zoomResult.nodal_offsets_mm[String(r.focal_length_mm)];
+                  const nodalEntry = zoomResult.nodal_offsets_mm[String(r.focal_length_mm)];
+                  const nz = nodalEntry != null ? (typeof nodalEntry === 'object' ? nodalEntry.tz : nodalEntry) : null;
                   return (
                     <tr key={r.focal_length_mm} className={r.error ? 'opacity-50' : ''}>
                       <td className="py-2 pr-4 font-semibold text-slate-200">{r.focal_length_mm}</td>

@@ -47,6 +47,8 @@ from collections import Counter
 from scipy.interpolate import PchipInterpolator
 from scipy.optimize import curve_fit
 
+from calib_helpers import make_objp, confidence, is_implausible_solution, run_constrained_fallback
+
 
 # ---------------------------------------------------------------------------
 # Physics-informed curve models
@@ -159,65 +161,13 @@ def run_zoom_calibration(
         nodal_model: dict | None,                      # Padé/poly model for export
     }
     """
-    full_objp = _make_objp(board_cols, board_rows, square_size_mm)
+    full_objp = make_objp(board_cols, board_rows, square_size_mm)
 
     fl_results: list[dict] = []
     optical_centers: list          = []   # None or np.ndarray (corrected) per group
     K_best: np.ndarray | None      = None  # camera matrix from lowest-RMS FL so far
     D_best: np.ndarray | None      = None  # dist coeffs from lowest-RMS FL so far
     pending_nodal: list[dict]      = []   # FLs needing PnP-only nodal estimation
-
-    def _is_implausible_solution(cam_mtx: np.ndarray, dist_c: np.ndarray, calib_size_local: tuple) -> bool:
-        w, h = calib_size_local
-        fx = float(cam_mtx[0, 0])
-        fy = float(cam_mtx[1, 1])
-        cx = float(cam_mtx[0, 2])
-        cy = float(cam_mtx[1, 2])
-        dc = dist_c.flatten()
-        k1 = float(dc[0]) if len(dc) > 0 else 0.0
-        k2 = float(dc[1]) if len(dc) > 1 else 0.0
-        p1 = float(dc[2]) if len(dc) > 2 else 0.0
-        p2 = float(dc[3]) if len(dc) > 3 else 0.0
-        if not np.isfinite([fx, fy, cx, cy, k1, k2, p1, p2]).all():
-            return True
-        if fx < 0.2 * w or fy < 0.2 * h:
-            return True
-        if fx > 20.0 * w or fy > 20.0 * h:
-            return True
-        if abs(cx) > 3.0 * w or abs(cy) > 3.0 * h:
-            return True
-        if abs(k1) > 2.0 or abs(k2) > 2.0:
-            return True
-        if abs(p1) > 0.2 or abs(p2) > 0.2:
-            return True
-        return False
-
-    def _run_constrained_fallback(obj_points_local: list, img_points_local: list, calib_size_local: tuple):
-        w, h = calib_size_local
-        # Use the same physics-based init as the primary sparse solve so the
-        # fallback also starts close to the true focal length.
-        if sensor_width_mm > 0 and fl_mm > 0:  # noqa: B023 (closure captures current loop value)
-            fx_fb = float(fl_mm) * float(w) / float(sensor_width_mm)
-        else:
-            fx_fb = float(max(w, h))
-        cam0 = np.array(
-            [[fx_fb, 0.0, w / 2.0],
-             [0.0, fx_fb, h / 2.0],
-             [0.0, 0.0, 1.0]],
-            dtype=np.float64,
-        )
-        dc0 = np.zeros((5, 1), dtype=np.float64)
-        flags = getattr(cv2, "CALIB_FIX_SKEW", 0)
-        flags |= (
-            cv2.CALIB_USE_INTRINSIC_GUESS
-            | cv2.CALIB_FIX_K2
-            | cv2.CALIB_FIX_K3
-            | cv2.CALIB_ZERO_TANGENT_DIST
-            | cv2.CALIB_FIX_ASPECT_RATIO
-        )
-        return cv2.calibrateCamera(
-            obj_points_local, img_points_local, calib_size_local, cam0, dc0, flags=flags
-        )
 
     for group in fl_groups:
         fl_mm           = float(group["focal_length_mm"])
@@ -264,7 +214,7 @@ def run_zoom_calibration(
                 p_cols, p_rows = int(partial_size[0]), int(partial_size[1])
                 if corners.shape[0] != p_cols * p_rows:
                     continue
-                obj = _make_objp(p_cols, p_rows, square_size_mm)
+                obj = make_objp(p_cols, p_rows, square_size_mm)
             else:
                 if corners.shape[0] != board_rows * board_cols:
                     continue
@@ -336,12 +286,13 @@ def run_zoom_calibration(
             continue
 
         solve_warning = None
-        if _is_implausible_solution(cam_mtx, dist_c, calib_size):
+        if is_implausible_solution(cam_mtx, dist_c, calib_size):
             try:
-                rms_fb, cam_fb, dist_fb, rv_fb, tv_fb = _run_constrained_fallback(
-                    obj_points_norm, img_points, calib_size
+                fx_init = (float(fl_mm) * float(calib_size[0]) / float(sensor_width_mm)) if sensor_width_mm > 0 and fl_mm > 0 else None
+                rms_fb, cam_fb, dist_fb, rv_fb, tv_fb = run_constrained_fallback(
+                    obj_points_norm, img_points, calib_size, fx_init=fx_init
                 )
-                if _is_implausible_solution(cam_fb, dist_fb, calib_size):
+                if is_implausible_solution(cam_fb, dist_fb, calib_size):
                     fl_results.append({
                         "focal_length_mm": fl_mm,
                         "rms": None,
@@ -415,11 +366,19 @@ def run_zoom_calibration(
         fl_computed = (fx_px * sensor_width_mm / calib_size[0]
                        if sensor_width_mm > 0 else 0.0)
 
-        # ── Optical centre for each image ──────────────────────────────────
+        # ── Optical centre for each image (weighted by reprojection error) ──
         centers = []
-        for rv, tv in zip(rvecs, tvecs):
+        weights = []
+        for obj, img, rv, tv in zip(obj_points_norm, img_points, rvecs, tvecs):
             centers.append(_camera_center_from_rt(rv, tv, group_scale_mm))
-        mean_center = np.mean(centers, axis=0).copy()
+            proj, _ = cv2.projectPoints(obj, rv, tv, cam_mtx, dist_c)
+            err = float(np.sqrt(np.mean(
+                np.sum((img.reshape(-1, 2) - proj.reshape(-1, 2)) ** 2, axis=1)
+            )))
+            weights.append(1.0 / max(err, 1e-6))
+        weights = np.array(weights, dtype=float)
+        weights /= weights.sum()
+        mean_center = np.average(np.array(centers), axis=0, weights=weights).copy()
 
         # Working-distance correction: when the user stepped back to keep
         # the chart visible at this FL, subtract the extra distance so all
@@ -464,7 +423,7 @@ def run_zoom_calibration(
             "optical_center_world":     mean_center.tolist(),
             "used_frames":              len(obj_points),
             "per_image_errors":         pie,
-            "confidence":               _confidence(rms, sparse=sparse_mode),
+            "confidence":               confidence(rms, sparse=sparse_mode),
             "detection_type":           selected_det,
             "warning":                  solve_warning,
             "error":                    None,
@@ -488,7 +447,11 @@ def run_zoom_calibration(
             valid,
             key=lambda v: fl_results[v[0]].get("rms") or float("inf"),
         )[0]
-        ref_cam = np.array(fl_results[ref_idx]["camera_matrix"], dtype=np.float64)
+        # Average K from the two best-RMS FLs for a more robust reference
+        valid_sorted = sorted(valid, key=lambda v: fl_results[v[0]].get("rms") or float("inf"))
+        ref_cams = [np.array(fl_results[valid_sorted[j][0]]["camera_matrix"], dtype=np.float64)
+                    for j in range(min(2, len(valid_sorted)))]
+        ref_cam = np.mean(ref_cams, axis=0)
         ref_dc = np.array(fl_results[ref_idx]["dist_coeffs"], dtype=np.float64).reshape(-1, 1)
         for item in pending_nodal:
             centers = []
@@ -500,7 +463,7 @@ def run_zoom_calibration(
                     continue
                 pnp_scale_mm = _estimate_scale_mm(obj_pnp)
                 obj_pnp_norm = obj_pnp / float(pnp_scale_mm)
-                ok, rvec, tvec = cv2.solvePnP(
+                ok, rvec, tvec, _ = cv2.solvePnPRansac(
                     obj_pnp_norm,
                     img_pnp,
                     ref_cam,
@@ -519,7 +482,10 @@ def run_zoom_calibration(
             if len(centers) < 3:
                 continue
 
-            mean_center = np.mean(np.array(centers), axis=0)
+            # Weighted mean by inverse reprojection error
+            pnp_weights = np.array([1.0 / max(e["error"], 1e-6) for e in pie])
+            pnp_weights /= pnp_weights.sum()
+            mean_center = np.average(np.array(centers), axis=0, weights=pnp_weights)
             idx = int(item["index"])
             optical_centers[idx] = mean_center
             fl_results[idx].update({
@@ -542,7 +508,8 @@ def run_zoom_calibration(
     # Recompute after any nodal fallback updates.
     valid = [(i, c) for i, c in enumerate(optical_centers) if c is not None]
 
-    nodal_offsets: dict[str, float] = {}
+    nodal_offsets: dict[str, dict] = {}   # key → {"tx": x, "ty": y, "tz": z}
+    nodal_offsets_z: dict[str, float] = {}  # key → tz (for backward compat)
     nodal_model_dict: dict | None = None
 
     if valid:
@@ -550,22 +517,30 @@ def run_zoom_calibration(
             valid,
             key=lambda v: fl_results[v[0]].get("rms") or float("inf"),
         )[0]
-        ref_z = float(optical_centers[best_idx][2])
+        ref_center = optical_centers[best_idx].copy()
         for idx, center in valid:
             fl_mm_val = fl_results[idx]["focal_length_mm"]
             key = str(int(fl_mm_val)) if fl_mm_val == int(fl_mm_val) else f"{fl_mm_val:.1f}"
-            nodal_offsets[key] = round(float(center[2]) - ref_z, 2)
+            delta = center - ref_center
+            nodal_offsets[key] = {
+                "tx": round(float(delta[0]), 2),
+                "ty": round(float(delta[1]), 2),
+                "tz": round(float(delta[2]), 2),
+            }
+            nodal_offsets_z[key] = round(float(delta[2]), 2)
 
         # Fit Padé/poly model for extrapolation beyond calibrated range
         if len(valid) >= 2:
             try:
                 mfl = np.array([fl_results[i]["focal_length_mm"] for i, _ in valid])
-                mnz = np.array([nodal_offsets[
+                mnz = np.array([nodal_offsets_z[
                     str(int(fl_results[i]["focal_length_mm"]))
                     if fl_results[i]["focal_length_mm"] == int(fl_results[i]["focal_length_mm"])
                     else f"{fl_results[i]['focal_length_mm']:.1f}"
                 ] for i, _ in valid])
                 nodal_model_dict = fit_nodal_model(mfl, mnz)
+                # Strip non-serializable PCHIP interpolator before sending to frontend
+                nodal_model_dict.pop("pchip", None)
             except Exception:
                 nodal_model_dict = None
 
@@ -617,6 +592,7 @@ def _pose_only_calibration(
     D_ref = D_fixed if D_fixed is not None else np.zeros((5, 1), dtype=np.float64)
 
     centers = []
+    weights = []
     for frame in usable:
         corners = np.array(frame["corners"], dtype=np.float32).reshape(-1, 1, 2)
         partial_size = frame.get("partial_grid_size")
@@ -624,11 +600,11 @@ def _pose_only_calibration(
             p_cols, p_rows = int(partial_size[0]), int(partial_size[1])
             if corners.shape[0] != p_cols * p_rows:
                 continue
-            obj = _make_objp(p_cols, p_rows, square_size_mm)
+            obj = make_objp(p_cols, p_rows, square_size_mm)
         else:
             if corners.shape[0] != board_rows * board_cols:
                 continue
-            obj = _make_objp(board_cols, board_rows, square_size_mm)
+            obj = make_objp(board_cols, board_rows, square_size_mm)
 
         if squeeze_ratio > 1.0:
             corners = corners.copy()
@@ -637,13 +613,18 @@ def _pose_only_calibration(
         try:
             pnp_scale_mm = _estimate_scale_mm(obj)
             obj_norm = obj / float(pnp_scale_mm)
-            ok, rvec, tvec = cv2.solvePnP(
+            ok, rvec, tvec, _ = cv2.solvePnPRansac(
                 obj_norm, corners, K_fixed, D_ref,
                 flags=cv2.SOLVEPNP_ITERATIVE,
             )
             if not ok:
                 continue
             centers.append(_camera_center_from_rt(rvec, tvec, pnp_scale_mm))
+            proj, _ = cv2.projectPoints(obj_norm, rvec, tvec, K_fixed, D_ref)
+            err = float(np.sqrt(np.mean(
+                np.sum((corners.reshape(-1, 2) - proj.reshape(-1, 2)) ** 2, axis=1)
+            )))
+            weights.append(1.0 / max(err, 1e-6))
         except Exception:
             continue
 
@@ -654,7 +635,9 @@ def _pose_only_calibration(
             "error": f"pose-only: only {len(centers)} valid poses from {len(usable)} frames",
         }
 
-    mean_center = np.mean(centers, axis=0).copy()
+    weights = np.array(weights, dtype=float)
+    weights /= weights.sum()
+    mean_center = np.average(np.array(centers), axis=0, weights=weights).copy()
     if working_dist_mm > 0:
         mean_center[2] -= working_dist_mm
 
@@ -757,7 +740,15 @@ def _interpolate_fl_table(
     fy_vals  = np.array([r["fy_px"] for r in valid], dtype=float)
     cx_vals  = np.array([r["cx_px"] for r in valid], dtype=float)
     cy_vals  = np.array([r["cy_px"] for r in valid], dtype=float)
-    nz_vals  = np.array([nodal_offsets.get(_nz_key(r["focal_length_mm"]), 0.0) for r in valid], dtype=float)
+    def _get_nodal_component(fl_mm_val: float, key: str) -> float:
+        entry = nodal_offsets.get(_nz_key(fl_mm_val))
+        if isinstance(entry, dict):
+            return float(entry.get(key, 0.0))
+        return float(entry) if entry is not None and key == "tz" else 0.0
+
+    nz_vals  = np.array([_get_nodal_component(r["focal_length_mm"], "tz") for r in valid], dtype=float)
+    nx_vals  = np.array([_get_nodal_component(r["focal_length_mm"], "tx") for r in valid], dtype=float)
+    ny_vals  = np.array([_get_nodal_component(r["focal_length_mm"], "ty") for r in valid], dtype=float)
 
     dc_len = max(len(r.get("dist_coeffs", [])) for r in valid)
     dc_arrays = []
@@ -773,6 +764,8 @@ def _interpolate_fl_table(
     pchip_cx  = PchipInterpolator(fls, cx_vals)
     pchip_cy  = PchipInterpolator(fls, cy_vals)
     pchip_nz  = PchipInterpolator(fls, nz_vals)
+    pchip_nx  = PchipInterpolator(fls, nx_vals)
+    pchip_ny  = PchipInterpolator(fls, ny_vals)
     pchip_dc  = [PchipInterpolator(fls, dc_arrays[di]) for di in range(dc_len)]
 
     # Physics model only makes sense with ≥2 points (which we already guarantee)
@@ -782,6 +775,8 @@ def _interpolate_fl_table(
     cx_interp  = _fit_or_pchip(fls, cx_vals,  _linear,  q, pchip_cx)
     cy_interp  = _fit_or_pchip(fls, cy_vals,  _linear,  q, pchip_cy)
     nz_interp  = _fit_or_pchip(fls, nz_vals,  _linear,  q, pchip_nz)
+    nx_interp  = _fit_or_pchip(fls, nx_vals,  _linear,  q, pchip_nx)
+    ny_interp  = _fit_or_pchip(fls, ny_vals,  _linear,  q, pchip_ny)
 
     # Distortion: k1/k2/k3 (indices 0,1,4) use inv-sq model; p1/p2 (2,3) use linear
     dc_interps = []
@@ -806,13 +801,19 @@ def _interpolate_fl_table(
         # Padé model outside (telephoto extrapolation).
         if fl_min <= fl <= fl_max:
             nz = round(float(nz_interp[qi]), 4)
+            nx = round(float(nx_interp[qi]), 4)
+            ny = round(float(ny_interp[qi]), 4)
             extrapolated = False
         elif nodal_model_dict is not None:
             nz = round(float(predict_nodal(nodal_model_dict, np.array([fl]))[0]), 4)
+            nx = round(float(nx_interp[qi]), 4)
+            ny = round(float(ny_interp[qi]), 4)
             extrapolated = True
         else:
             # Linear extension from boundary via PCHIP extrapolation
             nz = round(float(nz_interp[qi]), 4)
+            nx = round(float(nx_interp[qi]), 4)
+            ny = round(float(ny_interp[qi]), 4)
             extrapolated = True
 
         cam_mtx = [
@@ -830,29 +831,10 @@ def _interpolate_fl_table(
             "dist_coeffs":       [round(v, 8) for v in dc],
             "camera_matrix":     cam_mtx,
             "nodal_offset_z_mm": nz,
+            "nodal_offset_x_mm": nx,
+            "nodal_offset_y_mm": ny,
             "interpolated":      True,
             "extrapolated":      extrapolated,
         })
 
     return rows
-
-
-def _make_objp(cols: int, rows: int, square_size_mm: float) -> np.ndarray:
-    """Build a planar (z=0) object-point array for a cols×rows inner-corner grid."""
-    pts = np.zeros((rows * cols, 3), dtype=np.float32)
-    pts[:, :2] = np.mgrid[0:cols, 0:rows].T.reshape(-1, 2) * square_size_mm
-    return pts
-
-
-def _confidence(rms: float, sparse: bool = False) -> str:
-    """Grade calibration quality. Sparse-board (ArUco) tolerates higher RMS."""
-    if sparse:
-        if rms < 0.7:  return "excellent"
-        if rms < 1.5:  return "good"
-        if rms < 3.0:  return "marginal"
-        return "poor"
-    else:
-        if rms < 0.3:  return "excellent"
-        if rms < 0.5:  return "good"
-        if rms < 1.0:  return "marginal"
-        return "poor"

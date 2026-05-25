@@ -1,21 +1,222 @@
 {
-  "_comment": "Nodal offset presets.  Each key is the preset name used with --nodal-preset.",
-  "_format": "List of [focal_length_mm, entrance_pupil_distance_from_flange_mm] pairs, measured at infinity focus.",
-
-  "fujinon-premista-28-100": {
-    "description": "Fujinon Premista 28-100mm T2.9 — entrance pupil from flange (manufacturer spec)",
-    "focal_lengths_mm": [
-      [28.0,  28.0],
-      [100.0, 100.0]
-    ],
+  "fujinon_premista28-100": {
+    "sensor": "31.1 × 16.8 mm (S35)",
+    "mount": "PL",
+    "squeeze": 1.0,
+    "notes": "Measured from physical premista28-100 @ 2560×1440 — rest is estimated",
     "points": [
-      [28.0,  151.4],
-      [35.0,  144.2],
-      [40.0,  139.7],
-      [50.0,  135.8],
-      [65.0,  128.4],
-      [85.0,  122.5],
-      [100.0, 118.3]
+      [28, 17.5],
+      [35, 19.0],
+      [40, 20.0],
+      [50, 22.0],
+      [65, 24.5],
+      [75, 26.0],
+      [80, 26.8],
+      [100, 29.5]
+    ]
+  },
+  "fujinon_premista19-45": {
+    "sensor": "31.1 × 16.8 mm (S35)",
+    "mount": "PL",
+    "squeeze": 1.0,
+    "notes": "Estimated based on optical design family",
+    "points": [
+      [19, 15.0],
+      [24, 16.5],
+      [28, 17.5],
+      [35, 19.0],
+      [40, 20.0],
+      [45, 21.0]
+    ]
+  },
+  "fujinon_premista80-250": {
+    "sensor": "31.1 × 16.8 mm (S35)",
+    "mount": "PL",
+    "squeeze": 1.0,
+    "notes": "Estimated based on optical design family",
+    "points": [
+      [80, 27.0],
+      [100, 29.5],
+      [125, 32.0],
+      [150, 34.5],
+      [180, 37.0],
+      [200, 39.0],
+      [250, 43.0]
+    ]
+  },
+  "angenieux_ez1_30-90": {
+    "sensor": "31.1 × 16.8 mm (S35)",
+    "mount": "PL",
+    "squeeze": 1.0,
+    "notes": "Estimated from Angenieux published optical data",
+    "points": [
+      [30, 18.0],
+      [40, 19.5],
+      [50, 21.0],
+      [60, 22.5],
+      [70, 24.0],
+      [80, 25.5],
+      [90, 27.0]
+    ]
+  },
+  "angenieux_ez1_45-135": {
+    "sensor": "24 × 13.5 mm (FF)",
+    "mount": "PL",
+    "squeeze": 1.0,
+    "notes": "Estimated — FF rear module",
+    "points": [
+      [45, 20.0],
+      [60, 22.5],
+      [75, 24.5],
+      [90, 26.5],
+      [105, 28.5],
+      [120, 30.5],
+      [135, 32.5]
+    ]
+  },
+  "angenieux_ez2_15-40": {
+    "sensor": "31.1 × 16.8 mm (S35)",
+    "mount": "PL",
+    "squeeze": 1.0,
+    "notes": "Estimated from Angenieux published optical data",
+    "points": [
+      [15, 14.0],
+      [20, 15.5],
+      [25, 16.5],
+      [30, 18.0],
+      [35, 19.0],
+      [40, 20.0]
+    ]
+  },
+  "angenieux_ez2_22-60": {
+    "sensor": "24 × 13.5 mm (FF)",
+    "mount": "PL",
+    "squeeze": 1.0,
+    "notes": "Estimated — FF rear module",
+    "points": [
+      [22, 16.0],
+      [30, 18.0],
+      [40, 19.5],
+      [50, 21.0],
+      [60, 22.5]
+    ]
+  },
+  "angenieux_optimo_15-40": {
+    "sensor": "31.1 × 16.8 mm (S35)",
+    "mount": "PL",
+    "squeeze": 1.0,
+    "notes": "Estimated",
+    "points": [
+      [15, 14.5],
+      [20, 16.0],
+      [25, 17.0],
+      [30, 18.0],
+      [35, 19.0],
+      [40, 20.0]
+    ]
+  },
+  "angenieux_optimo_24-290": {
+    "sensor": "31.1 × 16.8 mm (S35)",
+    "mount": "PL",
+    "squeeze": 1.0,
+    "notes": "Estimated — long-range cinema zoom",
+    "points": [
+      [24, 17.0],
+      [35, 19.5],
+      [50, 22.0],
+      [75, 25.5],
+      [100, 28.5],
+      [150, 33.0],
+      [200, 37.5],
+      [250, 42.0],
+      [290, 46.0]
+    ]
+  },
+  "canon_cne1555": {
+    "sensor": "31.1 × 16.8 mm (S35)",
+    "mount": "PL",
+    "squeeze": 1.0,
+    "notes": "Estimated from Canon CN-E optical design",
+    "points": [
+      [15, 14.0],
+      [20, 15.5],
+      [25, 16.5],
+      [30, 18.0],
+      [40, 20.0],
+      [50, 22.0],
+      [55, 23.0]
+    ]
+  },
+  "canon_cne30135": {
+    "sensor": "31.1 × 16.8 mm (S35)",
+    "mount": "PL",
+    "squeeze": 1.0,
+    "notes": "Estimated from Canon CN-E optical design",
+    "points": [
+      [30, 18.0],
+      [40, 19.5],
+      [50, 21.0],
+      [75, 24.5],
+      [100, 27.0],
+      [120, 29.0],
+      [135, 31.0]
+    ]
+  },
+  "sigma_cine_18-35": {
+    "sensor": "24 × 13.5 mm (FF)",
+    "mount": "PL/LPL",
+    "squeeze": 1.0,
+    "notes": "Estimated — Sigma FF High Speed Zoom",
+    "points": [
+      [18, 14.5],
+      [22, 15.5],
+      [25, 16.0],
+      [28, 17.0],
+      [32, 18.0],
+      [35, 18.5]
+    ]
+  },
+  "sigma_cine_50-100": {
+    "sensor": "24 × 13.5 mm (FF)",
+    "mount": "PL/LPL",
+    "squeeze": 1.0,
+    "notes": "Estimated — Sigma FF High Speed Zoom",
+    "points": [
+      [50, 22.0],
+      [60, 23.5],
+      [70, 25.0],
+      [80, 26.5],
+      [90, 28.0],
+      [100, 29.5]
+    ]
+  },
+  "cooke_varo_18-90": {
+    "sensor": "31.1 × 16.8 mm (S35)",
+    "mount": "PL",
+    "squeeze": 1.0,
+    "notes": "Estimated — Cooke Varotal/i",
+    "points": [
+      [18, 15.0],
+      [25, 16.5],
+      [35, 18.5],
+      [50, 21.0],
+      [65, 23.0],
+      [75, 24.5],
+      [90, 26.5]
+    ]
+  },
+  "cooke_varo_30-95": {
+    "sensor": "31.1 × 16.8 mm (S35)",
+    "mount": "PL",
+    "squeeze": 1.0,
+    "notes": "Estimated — Cooke Varotal/i",
+    "points": [
+      [30, 18.0],
+      [40, 19.5],
+      [50, 21.0],
+      [65, 23.0],
+      [80, 25.0],
+      [95, 27.0]
     ]
   }
 }

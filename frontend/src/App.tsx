@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { BoardSettings, CameraSettings, CalibrationResult, ConnStatus, LensSettings, ScoredFrame } from './types';
-import type { ZoomCalibResult, ZoomFlResult } from './components/GuidedCapture';
+import type { ZoomCalibResult, ZoomFlResult, NodalEntry } from './components/GuidedCapture';
 import CoverageMap from './components/CoverageMap';
 import DropZone from './components/DropZone';
 import FileCalibration from './components/FileCalibration';
@@ -71,6 +71,9 @@ function flResultToCalibResult(r: ZoomFlResult, imageSize: [number, number]): Ca
     per_image_errors: r.per_image_errors ?? [],
     used_frames: r.used_frames ?? 0,
     skipped_frames: 0,
+    squeeze_ratio: 1.0,
+    lens_type: 'spherical',
+    error: r.error ?? null,
   };
 }
 
@@ -85,6 +88,85 @@ interface ZoomResultsPanelProps {
   onExportStatusChange: (s: 'idle' | 'loading' | 'success' | 'error') => void;
   selectedFlMm: number | null;
   onSelectFl: (fl: number | null) => void;
+}
+
+/** Color-coded sparkline showing RMS across the zoom range. */
+function RmsSparkline({ flResults, selectedFlMm, onSelectFl }: {
+  flResults: ZoomFlResult[];
+  selectedFlMm: number | null;
+  onSelectFl: (fl: number | null) => void;
+}) {
+  const valid = flResults.filter(r => r.rms != null);
+  if (valid.length < 2) return null;
+
+  const W = 320, H = 70, PAD = 8;
+  const rmsMax = Math.max(...valid.map(r => r.rms!), 1.0);
+  const flMin = Math.min(...valid.map(r => r.focal_length_mm));
+  const flMax = Math.max(...valid.map(r => r.focal_length_mm));
+  const flRange = flMax - flMin || 1;
+
+  const xScale = (fl: number) => PAD + ((fl - flMin) / flRange) * (W - 2 * PAD);
+  const yScale = (rms: number) => H - PAD - (rms / rmsMax) * (H - 2 * PAD);
+
+  const color = (rms: number) =>
+    rms < 0.3 ? '#34d399' : rms < 0.5 ? '#60a5fa' : rms < 1.0 ? '#facc15' : '#f87171';
+
+  return (
+    <div className="rounded-xl bg-slate-800 border border-slate-700 p-4">
+      <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
+        RMS across zoom range
+      </h3>
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ maxHeight: 70 }}>
+        {/* Reference lines */}
+        {[0.3, 0.5, 1.0].filter(v => v <= rmsMax).map(v => (
+          <g key={v}>
+            <line x1={PAD} y1={yScale(v)} x2={W - PAD} y2={yScale(v)}
+              stroke="#334155" strokeWidth={0.5} strokeDasharray="3 3" />
+            <text x={W - PAD + 2} y={yScale(v) + 3} fill="#475569" fontSize={7}>{v}</text>
+          </g>
+        ))}
+        {/* Bars */}
+        {valid.map((r, i) => {
+          const x = xScale(r.focal_length_mm);
+          const barW = Math.max(6, (W - 2 * PAD) / valid.length - 2);
+          const isSelected = selectedFlMm === r.focal_length_mm;
+          return (
+            <rect
+              key={i}
+              x={x - barW / 2}
+              y={yScale(r.rms!)}
+              width={barW}
+              height={H - PAD - yScale(r.rms!)}
+              fill={color(r.rms!)}
+              opacity={isSelected ? 1 : 0.7}
+              rx={2}
+              className="cursor-pointer"
+              onClick={() => onSelectFl(isSelected ? null : r.focal_length_mm)}
+            />
+          );
+        })}
+        {/* X axis */}
+        <line x1={PAD} y1={H - PAD} x2={W - PAD} y2={H - PAD} stroke="#475569" strokeWidth={0.5} />
+        {/* X labels */}
+        <text x={xScale(flMin)} y={H - 1} textAnchor="start" fill="#64748b" fontSize={7}>{flMin}mm</text>
+        <text x={xScale(flMax)} y={H - 1} textAnchor="end" fill="#64748b" fontSize={7}>{flMax}mm</text>
+      </svg>
+      {/* Legend */}
+      <div className="flex gap-3 mt-1.5">
+        {[
+          { c: '#34d399', l: 'excellent (<0.3)' },
+          { c: '#60a5fa', l: 'good (<0.5)' },
+          { c: '#facc15', l: 'marginal (<1.0)' },
+          { c: '#f87171', l: 'poor (>1.0)' },
+        ].map(({ c, l }) => (
+          <div key={l} className="flex items-center gap-1 text-[9px] text-slate-500">
+            <span className="w-2 h-2 rounded-sm" style={{ background: c }} />
+            {l}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 function ZoomResultsPanel({ result, imageSize, ws, lensSettings, cameraSettings, exportStatus, exportPath, onExportStatusChange, selectedFlMm, onSelectFl }: ZoomResultsPanelProps) {
@@ -143,6 +225,9 @@ function ZoomResultsPanel({ result, imageSize, ws, lensSettings, cameraSettings,
         </span>
       </div>
 
+      {/* RMS sparkline across zoom range */}
+      <RmsSparkline flResults={result.fl_results} selectedFlMm={selectedFlMm} onSelectFl={onSelectFl} />
+
       {/* Two-column layout when a FL is selected */}
       <div className={selectedFlResult ? 'grid grid-cols-2 gap-5 items-start' : ''}>
 
@@ -164,7 +249,10 @@ function ZoomResultsPanel({ result, imageSize, ws, lensSettings, cameraSettings,
               <tbody className="divide-y divide-slate-700/50">
                 {result.fl_results.map(r => {
                   const nzKey = Number.isInteger(r.focal_length_mm) ? String(r.focal_length_mm) : r.focal_length_mm.toFixed(1);
-                  const nz = result.nodal_offsets_mm[nzKey] ?? result.nodal_offsets_mm[String(r.focal_length_mm)];
+                  const nodalEntry = result.nodal_offsets_mm[nzKey] ?? result.nodal_offsets_mm[String(r.focal_length_mm)];
+                  const tz = nodalEntry != null ? (typeof nodalEntry === 'object' ? nodalEntry.tz : nodalEntry) : null;
+                  const tx = nodalEntry != null && typeof nodalEntry === 'object' ? nodalEntry.tx : 0;
+                  const ty = nodalEntry != null && typeof nodalEntry === 'object' ? nodalEntry.ty : 0;
                   const isSelected = selectedFlMm === r.focal_length_mm;
                   return (
                     <tr key={r.focal_length_mm}
@@ -176,7 +264,9 @@ function ZoomResultsPanel({ result, imageSize, ws, lensSettings, cameraSettings,
                       </td>
                       <td className="py-2 pr-4 text-right font-mono tabular-nums text-slate-300">{r.fx_px ? r.fx_px.toFixed(0) : '—'}</td>
                       <td className="py-2 pr-4 text-right font-mono tabular-nums text-slate-300">{r.dist_coeffs?.[0] != null ? r.dist_coeffs[0].toFixed(4) : '—'}</td>
-                      <td className="py-2 pr-4 text-right font-mono tabular-nums text-slate-400">{nz != null ? `${nz >= 0 ? '+' : ''}${nz.toFixed(1)} mm` : '—'}</td>
+                      <td className="py-2 pr-4 text-right font-mono tabular-nums text-slate-400" title={tz != null ? `Tx=${tx.toFixed(2)} Ty=${ty.toFixed(2)} Tz=${tz.toFixed(2)} mm` : undefined}>
+                        {tz != null ? `${tz >= 0 ? '+' : ''}${tz.toFixed(1)} mm` : '—'}
+                      </td>
                       <td className={`py-2 text-right capitalize ${ZOOM_CONFIDENCE_COLOR[r.confidence] ?? 'text-slate-500'}`}>
                         {r.error ? 'error' : (r.confidence ?? '—')}
                       </td>
@@ -187,7 +277,7 @@ function ZoomResultsPanel({ result, imageSize, ws, lensSettings, cameraSettings,
             </table>
           </div>
           <p className="text-[11px] text-slate-500 leading-relaxed">
-            Nodal Δ = Z-axis shift vs reference FL. Click a row to see full distortion details.
+            Nodal Δ = entrance-pupil shift vs reference FL (Tx=lateral X, Ty=lateral Y, Tz=axial). Click a row to see full distortion details.
           </p>
 
           {/* Interpolated nodal offset table toggle */}
@@ -203,18 +293,26 @@ function ZoomResultsPanel({ result, imageSize, ws, lensSettings, cameraSettings,
                     <thead className="sticky top-0 bg-slate-800">
                       <tr className="text-slate-500 uppercase tracking-wider border-b border-slate-700">
                         <th className="text-left pb-1.5 pr-4">FL (mm)</th>
-                        <th className="text-right pb-1.5 pr-4">f (px)</th>
-                        <th className="text-right pb-1.5 pr-4">k1</th>
-                        <th className="text-right pb-1.5">Nodal Δ (mm)</th>
+                        <th className="text-right pb-1.5 pr-3">f (px)</th>
+                        <th className="text-right pb-1.5 pr-3">k1</th>
+                        <th className="text-right pb-1.5 pr-3" title="Lateral X shift">Tx</th>
+                        <th className="text-right pb-1.5 pr-3" title="Lateral Y shift">Ty</th>
+                        <th className="text-right pb-1.5" title="Axial Z shift">Tz (mm)</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-700/30">
                       {interpRows.map(r => (
                         <tr key={r.focal_length_mm} className="text-slate-400">
                           <td className="py-1 pr-4 font-mono">{r.focal_length_mm.toFixed(1)}</td>
-                          <td className="py-1 pr-4 text-right font-mono">{r.fx_px.toFixed(0)}</td>
-                          <td className="py-1 pr-4 text-right font-mono">{r.dist_coeffs?.[0]?.toFixed(4) ?? '—'}</td>
-                          <td className={`py-1 text-right font-mono tabular-nums ${r.nodal_offset_z_mm >= 0 ? 'text-slate-300' : 'text-slate-300'}`}>
+                          <td className="py-1 pr-3 text-right font-mono">{r.fx_px.toFixed(0)}</td>
+                          <td className="py-1 pr-3 text-right font-mono">{r.dist_coeffs?.[0]?.toFixed(4) ?? '—'}</td>
+                          <td className="py-1 pr-3 text-right font-mono tabular-nums text-slate-400">
+                            {(r.nodal_offset_x_mm ?? 0).toFixed(2)}
+                          </td>
+                          <td className="py-1 pr-3 text-right font-mono tabular-nums text-slate-400">
+                            {(r.nodal_offset_y_mm ?? 0).toFixed(2)}
+                          </td>
+                          <td className="py-1 text-right font-mono tabular-nums text-slate-300">
                             {r.nodal_offset_z_mm >= 0 ? '+' : ''}{r.nodal_offset_z_mm.toFixed(2)}
                           </td>
                         </tr>
@@ -701,12 +799,34 @@ export default function App() {
               </label>
 
               <label className="flex flex-col gap-1">
-                <span className="text-xs text-slate-400">Nodal preset</span>
-                <input value={cameraSettings.nodalPreset}
+                <span className="text-xs text-slate-400">Nodal preset (optional)</span>
+                <select
+                  value={cameraSettings.nodalPreset}
                   onChange={e => setCameraSettings(s => ({ ...s, nodalPreset: e.target.value }))}
-                  placeholder="e.g. fujinon-premista-28-100 (leave blank to skip)"
-                  className="bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500" />
-                <span className="text-[11px] text-slate-500">Key from nodal_presets.json — overrides OpenCV focal length and nodal offset with manufacturer values.</span>
+                  className="bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500"
+                >
+                  <option value="">None — use measured values</option>
+                  {[
+                    ['fujinon_premista19-45', 'Fujinon Premista 19-45mm'],
+                    ['fujinon_premista28-100', 'Fujinon Premista 28-100mm'],
+                    ['fujinon_premista80-250', 'Fujinon Premista 80-250mm'],
+                    ['angenieux_ez1_30-90', 'Angenieux EZ-1 30-90mm (S35)'],
+                    ['angenieux_ez1_45-135', 'Angenieux EZ-1 45-135mm (FF)'],
+                    ['angenieux_ez2_15-40', 'Angenieux EZ-2 15-40mm (S35)'],
+                    ['angenieux_ez2_22-60', 'Angenieux EZ-2 22-60mm (FF)'],
+                    ['angenieux_optimo_15-40', 'Angenieux Optimo 15-40mm'],
+                    ['angenieux_optimo_24-290', 'Angenieux Optimo 24-290mm'],
+                    ['canon_cne1555', 'Canon CN-E 15-55mm'],
+                    ['canon_cne30135', 'Canon CN-E 30-135mm'],
+                    ['sigma_cine_18-35', 'Sigma Cine 18-35mm'],
+                    ['sigma_cine_50-100', 'Sigma Cine 50-100mm'],
+                    ['cooke_varo_18-90', 'Cooke Varotal/i 18-90mm'],
+                    ['cooke_varo_30-95', 'Cooke Varotal/i 30-95mm'],
+                  ].map(([key, label]) => (
+                    <option key={key} value={key}>{label}</option>
+                  ))}
+                </select>
+                <span className="text-[11px] text-slate-500">Overrides measured nodal offsets with manufacturer/estimated data.</span>
               </label>
             </div>
 
