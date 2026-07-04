@@ -273,6 +273,8 @@ export default function ResultPanel({ result, imageSize, ws }: Props) {
       rms: result.rms,
       image_size: imageSize,
       metadata: {},
+      squeeze_ratio: result.squeeze_ratio ?? 1,
+      lens_type: result.lens_type ?? 'spherical',
     };
     if (fmt.key === 'ue5_ulens') {
       msg.lens_name        = lensName.trim() || 'Lens';

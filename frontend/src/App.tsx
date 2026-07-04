@@ -187,6 +187,7 @@ function ZoomResultsPanel({ result, imageSize, ws, lensSettings, cameraSettings,
     ws.send(JSON.stringify({
       action: 'export', format: 'ue5_ulens_zoom', output_path: outputPath,
       fl_results: result.fl_results, nodal_offsets_mm: result.nodal_offsets_mm,
+      fl_interpolated: result.fl_interpolated ?? null,
       image_size: imageSize, lens_name: cameraSettings.lensName.trim() || 'Lens',
       sensor_width_mm: parseFloat(cameraSettings.sensorWidthMm) || 0,
       sensor_height_mm: parseFloat(cameraSettings.sensorHeightMm) || 0,

@@ -773,6 +773,7 @@ export default function GuidedCapture({ ws, boardSettings, onCalibrationSent, on
     ws.send(JSON.stringify({
       action: 'export', format: 'ue5_ulens_zoom', output_path: outputPath,
       fl_results: zoomResult.fl_results, nodal_offsets_mm: zoomResult.nodal_offsets_mm,
+      fl_interpolated: zoomResult.fl_interpolated ?? null,
       image_size: actualSize, lens_name: cameraSettings.lensName.trim() || 'Lens',
       sensor_width_mm: parseFloat(cameraSettings.sensorWidthMm) || 0,
       sensor_height_mm: parseFloat(cameraSettings.sensorHeightMm) || 0,

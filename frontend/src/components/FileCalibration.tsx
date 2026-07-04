@@ -28,6 +28,7 @@ function hasCalibExt(name: string) {
 const electronAPI = (window as unknown as {
   electronAPI?: {
     showOpenDialog: (opts: object) => Promise<{ canceled: boolean; filePaths: string[] }>;
+    getPathForFile?: (file: File) => string;
   };
 }).electronAPI;
 
@@ -171,7 +172,7 @@ export default function FileCalibration({
     if (scoring) return;
     const paths = Array.from(e.dataTransfer.files)
       .filter(f => hasCalibExt(f.name))
-      .map(f => (f as unknown as { path?: string }).path ?? '')
+      .map(f => electronAPI?.getPathForFile?.(f) ?? (f as unknown as { path?: string }).path ?? '')
       .filter(Boolean);
     scoreFiles(groupId, paths);
   };

@@ -26,12 +26,13 @@ from live_capture import run_live_capture, run_preview
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    # Allow local network — tab/phone on same LAN can access
     allow_origins=[
         "http://localhost:5173", "http://127.0.0.1:5173",
         "http://localhost:3000", "http://127.0.0.1:3000",
-        "*",  # Allow any origin from local network (no internet exposure)
     ],
+    # The dev server may be reached via a LAN IP (phone remote access) —
+    # allow private-network origins only, never the wildcard.
+    allow_origin_regex=r"^http://(10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)(:\d+)?$",
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
@@ -435,7 +436,13 @@ def _get_local_ip() -> str:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8000)
+    # Loopback by default; remote/phone access goes through the Vite dev-server
+    # proxy. Pass --host 0.0.0.0 to expose the backend on the LAN directly.
+    parser.add_argument("--host", type=str, default="127.0.0.1")
     args = parser.parse_args()
-    local_ip = _get_local_ip()
-    print(f"Backend listening on http://{local_ip}:{args.port} and http://localhost:{args.port}", flush=True)
-    uvicorn.run(app, host="0.0.0.0", port=args.port)
+    if args.host == "0.0.0.0":
+        local_ip = _get_local_ip()
+        print(f"Backend listening on http://{local_ip}:{args.port} and http://localhost:{args.port}", flush=True)
+    else:
+        print(f"Backend listening on http://{args.host}:{args.port}", flush=True)
+    uvicorn.run(app, host=args.host, port=args.port)

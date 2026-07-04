@@ -16,6 +16,7 @@ function isCalibImage(name: string) {
 // Electron's contextBridge exposes electronAPI; fall back gracefully in browser dev mode.
 const electronAPI = (window as unknown as { electronAPI?: {
   showOpenDialog: (opts: object) => Promise<{ canceled: boolean; filePaths: string[] }>;
+  getPathForFile?: (file: File) => string;
 } }).electronAPI;
 
 interface Props {
@@ -63,15 +64,15 @@ export default function DropZone({ ws, boardSettings, onBoardChange, onScoringDo
     }));
   };
 
-  // Drag-and-drop: Electron populates a non-standard `path` property on File objects
-  // even with contextIsolation, because drag source is the OS (not the renderer).
+  // Drag-and-drop: File.path was removed in Electron 32 — resolve paths via
+  // webUtils.getPathForFile exposed on the preload bridge (fallback for older builds).
   const onDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setDragging(false);
     if (scoring) return;
     const paths = Array.from(e.dataTransfer.files)
       .filter(f => isCalibImage(f.name))
-      .map(f => (f as unknown as { path?: string }).path ?? '')
+      .map(f => electronAPI?.getPathForFile?.(f) ?? (f as unknown as { path?: string }).path ?? '')
       .filter(Boolean);
     startScoring(paths);
   };

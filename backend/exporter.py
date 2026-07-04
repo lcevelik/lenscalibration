@@ -330,7 +330,7 @@ def export_ue5_ulens(
         calib_w = int(w * squeeze_ratio) if squeeze_ratio > 1.0 else w
 
         fx = float(cm[0, 0]) / calib_w
-        fy = float(cm[1, 1]) / calib_w
+        fy = float(cm[1, 1]) / h
         cx = float(cm[0, 2]) / calib_w
         cy = float(cm[1, 2]) / h
 
@@ -503,7 +503,7 @@ def export_ue5_ulens_zoom(
             if is_interp:
                 # Interpolated row: parameters are already in pixel units
                 fx_n = r["fx_px"] / calib_w
-                fy_n = r["fy_px"] / calib_w
+                fy_n = r["fy_px"] / h
                 cx_n = r["cx_px"] / calib_w
                 cy_n = r["cy_px"] / h
                 dc   = r.get("dist_coeffs", [0.0] * 5)
@@ -519,7 +519,7 @@ def export_ue5_ulens_zoom(
                 cm = np.array(r["camera_matrix"], dtype=np.float64)
                 dc_arr = np.array(r["dist_coeffs"], dtype=np.float64).flatten()
                 fx_n = float(cm[0, 0]) / calib_w
-                fy_n = float(cm[1, 1]) / calib_w
+                fy_n = float(cm[1, 1]) / h
                 cx_n = float(cm[0, 2]) / calib_w
                 cy_n = float(cm[1, 2]) / h
 
