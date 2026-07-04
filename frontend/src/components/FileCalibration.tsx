@@ -199,7 +199,8 @@ export default function FileCalibration({
   const busy = calibrating || calibratingZoom || scoring;
   const anyFrames = groups.some(g => g.frames.length > 0);
   const sensorOk = parseFloat(cameraSettings.sensorWidthMm) > 0;
-  const canFire = canCalibrate && (!isMultiFL || sensorOk);
+  const hasDuplicateFl = isMultiFL && new Set(groups.map(g => g.fl_mm)).size !== groups.length;
+  const canFire = canCalibrate && (!isMultiFL || (sensorOk && !hasDuplicateFl));
 
   const runCalibration = () => {
     if (!ws || ws.readyState !== WebSocket.OPEN || busy || !canFire) return;
@@ -255,6 +256,7 @@ export default function FileCalibration({
     if (isMultiFL) {
       if (!canCalibrate) return `Need ≥${MIN_FRAMES_PER_GROUP} usable frames per group`;
       if (!sensorOk) return 'Select a sensor preset to continue';
+      if (hasDuplicateFl) return 'Focal lengths must be unique per group';
       const total = readyGroups.reduce(
         (s, g) => s + g.frames.filter(f => !g.excluded.has(f.path) && f.quality !== 'fail').length, 0
       );

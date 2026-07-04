@@ -537,6 +537,8 @@ def export_ue5_ulens_zoom(
                     nz = float(_no)
                     nx, ny = 0.0, 0.0
 
+            fl_rows.append([focus_enc, ze(fl_mm), fx_n, fy_n])
+            ic_rows.append([focus_enc, ze(fl_mm), cx_n, cy_n])
             # Nodal offset row: Qx Qy Qz Qw Tx Ty Tz
             nd_rows.append([focus_enc, ze(fl_mm), 0.0, 0.0, 0.0, 1.0, nx, ny, nz])
             dist_rows.append([focus_enc, ze(fl_mm), k1, k2, k3, p1, p2])

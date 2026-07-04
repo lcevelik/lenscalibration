@@ -269,6 +269,18 @@ def _do_undistort(path: str, camera_matrix: list, dist_coeffs: list) -> dict:
     }
 
 
+async def _run_handler(websocket: WebSocket, handler, message: dict, fail_action: str) -> None:
+    """Run a WS handler; on failure report the error instead of killing the connection."""
+    try:
+        await handler(websocket, message)
+    except Exception as e:
+        print(f"[{fail_action}] handler error: {e}", flush=True)
+        try:
+            await websocket.send_text(json.dumps({"action": fail_action, "error": str(e)}))
+        except Exception:
+            pass
+
+
 async def _handle_preview_undistort(websocket: WebSocket, message: dict) -> None:
     path          = message.get("path", "")
     camera_matrix = message.get("camera_matrix", [])
@@ -347,13 +359,13 @@ async def websocket_endpoint(websocket: WebSocket):
             elif action == "score_frames":
                 await _handle_score_frames(websocket, message)
             elif action == "calibrate":
-                await _handle_calibrate(websocket, message)
+                await _run_handler(websocket, _handle_calibrate, message, "calibrate_result")
             elif action == "calibrate_zoom":
-                await _handle_calibrate_zoom(websocket, message)
+                await _run_handler(websocket, _handle_calibrate_zoom, message, "zoom_calibrate_result")
             elif action == "export":
-                await _handle_export(websocket, message)
+                await _run_handler(websocket, _handle_export, message, "export_result")
             elif action == "preview_undistort":
-                await _handle_preview_undistort(websocket, message)
+                await _run_handler(websocket, _handle_preview_undistort, message, "preview_result")
             elif action == "start_preview":
                 if preview_task and not preview_task.done():
                     preview_stop_event.set()

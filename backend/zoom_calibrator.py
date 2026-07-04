@@ -163,6 +163,19 @@ def run_zoom_calibration(
     """
     full_objp = make_objp(board_cols, board_rows, square_size_mm)
 
+    # Merge groups with equal focal lengths — duplicate x-values crash PCHIP
+    # interpolation later, and separate solves at the same FL are meaningless.
+    merged: dict[float, dict] = {}
+    for group in fl_groups:
+        fl = float(group["focal_length_mm"])
+        if fl in merged:
+            merged[fl]["frames"] = list(merged[fl].get("frames", [])) + list(group.get("frames", []))
+            if not merged[fl].get("working_distance_mm") and group.get("working_distance_mm"):
+                merged[fl]["working_distance_mm"] = group["working_distance_mm"]
+        else:
+            merged[fl] = dict(group)
+    fl_groups = list(merged.values())
+
     fl_results: list[dict] = []
     optical_centers: list          = []   # None or np.ndarray (corrected) per group
     K_best: np.ndarray | None      = None  # camera matrix from lowest-RMS FL so far
@@ -233,8 +246,8 @@ def run_zoom_calibration(
                 usable, K_best, D_best, board_cols, board_rows,
                 square_size_mm, squeeze_ratio, working_dist_mm, fl_mm,
             )
+            optical_centers.append(pose_result.pop("_mean_center", None))
             fl_results.append(pose_result)
-            optical_centers.append(pose_result.get("_mean_center"))
             continue
 
         calib_size = (int(image_size[0] * squeeze_ratio), image_size[1]) if squeeze_ratio > 1.0 else image_size
@@ -281,8 +294,8 @@ def run_zoom_calibration(
             )
             if pose_result.get("rms") is None:
                 pose_result["error"] = str(exc)
+            optical_centers.append(pose_result.pop("_mean_center", None))
             fl_results.append(pose_result)
-            optical_centers.append(pose_result.get("_mean_center"))
             continue
 
         solve_warning = None
@@ -312,8 +325,8 @@ def run_zoom_calibration(
                     "error",
                     "Implausible calibration solution for this FL. Capture more varied poses/frames.",
                 )
+                optical_centers.append(pose_result.pop("_mean_center", None))
                 fl_results.append(pose_result)
-                optical_centers.append(pose_result.get("_mean_center"))
                 continue
 
         if not np.isfinite(rms):
