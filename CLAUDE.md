@@ -32,7 +32,7 @@ Electron + Python/FastAPI + React/TypeScript application for cinema lens calibra
 
 ```bash
 # Backend unit tests
-cd backend && python -m pytest test_nodal_model.py -v
+cd backend && python -m pytest test_nodal_model.py test_main_security.py -v
 
 # TypeScript type check
 cd frontend && npx tsc --noEmit

@@ -4,6 +4,7 @@ import atexit
 import base64
 import json
 import os
+import re
 import socket
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
@@ -23,19 +24,41 @@ from zoom_calibrator import run_zoom_calibration
 from frame_scorer import score_frame
 from live_capture import run_live_capture, run_preview
 
+_ALLOWED_ORIGINS = [
+    "http://localhost:5173", "http://127.0.0.1:5173",
+    "http://localhost:3000", "http://127.0.0.1:3000",
+]
+# The dev server may be reached via a LAN IP (phone remote access) —
+# allow private-network origins only, never the wildcard.
+_PRIVATE_ORIGIN_RE = r"^http://(10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)(:\d+)?$"
+
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173", "http://127.0.0.1:5173",
-        "http://localhost:3000", "http://127.0.0.1:3000",
-    ],
-    # The dev server may be reached via a LAN IP (phone remote access) —
-    # allow private-network origins only, never the wildcard.
-    allow_origin_regex=r"^http://(10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)(:\d+)?$",
+    allow_origins=_ALLOWED_ORIGINS,
+    allow_origin_regex=_PRIVATE_ORIGIN_RE,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+
+def _is_allowed_origin(origin: Optional[str]) -> bool:
+    """Return True if a WebSocket Origin header is acceptable.
+
+    Browsers do not apply CORS to WebSockets, so the CORS middleware above does
+    nothing for /ws — without this check any web page the user visits could
+    drive the backend on localhost (enumerate cameras, write export files).
+
+    Native clients (CLI tools, tests) send no Origin at all, and the packaged
+    Electron app loads the UI via loadFile() so its origin is file://.
+    """
+    if not origin:
+        return True
+    if origin in ("file://", "null"):
+        return True
+    if origin in _ALLOWED_ORIGINS:
+        return True
+    return re.match(_PRIVATE_ORIGIN_RE, origin) is not None
 
 # Size the pool so CPU-bound calibration tasks don't starve preview I/O
 _executor = ThreadPoolExecutor(max_workers=min(16, (os.cpu_count() or 1) + 4))
@@ -188,10 +211,55 @@ _EXPORT_FORMATS = {
     "ue5_ulens_zoom": export_ue5_ulens_zoom,
 }
 
+_EXPORT_EXTENSIONS = {
+    "opencv_xml":     ".xml",
+    "json":           ".json",
+    "stmap_exr":      ".exr",
+    "ue5_ulens":      ".ulens",
+    "ue5_ulens_zoom": ".ulens",
+}
+
+
+def _check_output_path(path: str, fmt: str) -> Optional[str]:
+    """Validate an export target. Returns an error string, or None if OK.
+
+    Exports are the only write path reachable over the socket, so the target is
+    constrained: the extension must match the chosen format (a caller cannot
+    drop a .bat or .exe into a startup folder) and the parent directory must
+    already exist (no creating directory trees). Relative paths stay valid —
+    they are the fallback when running outside Electron, where there is no
+    native save dialog.
+    """
+    if not path or ".." in path:
+        return "Invalid output path"
+    expected = _EXPORT_EXTENSIONS[fmt]
+    if os.path.splitext(path)[1].lower() != expected:
+        return f"Output path for format '{fmt}' must end in '{expected}'"
+    try:
+        parent = os.path.dirname(os.path.realpath(os.path.abspath(path)))
+    except (ValueError, OSError):
+        return "Invalid output path"
+    if not os.path.isdir(parent):
+        return f"Output directory does not exist: {parent}"
+    return None
+
 
 async def _handle_export(websocket: WebSocket, message: dict) -> None:
     fmt: str = message.get("format", "json")
-    output_path: str = message.get("output_path", f"calibration.{fmt}")
+    if fmt not in _EXPORT_FORMATS:
+        await websocket.send_text(json.dumps({
+            "action": "export_result", "success": False,
+            "error": f"Unknown format '{fmt}'. Choose from: {list(_EXPORT_FORMATS)}",
+        }))
+        return
+    output_path: str = message.get("output_path", f"calibration{_EXPORT_EXTENSIONS[fmt]}")
+    path_error = _check_output_path(output_path, fmt)
+    if path_error:
+        await websocket.send_text(json.dumps({
+            "action": "export_result", "format": fmt, "success": False,
+            "error": path_error,
+        }))
+        return
     camera_matrix = message.get("camera_matrix")
     dist_coeffs   = message.get("dist_coeffs")
     fov_x: float  = float(message.get("fov_x", 0.0))
@@ -199,12 +267,6 @@ async def _handle_export(websocket: WebSocket, message: dict) -> None:
     rms: float    = float(message.get("rms", 0.0))
     image_size    = tuple(message.get("image_size", [1920, 1080]))
     metadata      = message.get("metadata", {})
-    if fmt not in _EXPORT_FORMATS:
-        await websocket.send_text(json.dumps({
-            "action": "export_result", "success": False,
-            "error": f"Unknown format '{fmt}'. Choose from: {list(_EXPORT_FORMATS)}",
-        }))
-        return
     squeeze_ratio: float = float(message.get("squeeze_ratio", 1.0))
     lens_type: str = message.get("lens_type", "spherical")
 
@@ -293,6 +355,11 @@ async def _handle_preview_undistort(websocket: WebSocket, message: dict) -> None
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    origin = websocket.headers.get("origin")
+    if not _is_allowed_origin(origin):
+        print(f"[ws] rejected connection from origin {origin!r}", flush=True)
+        await websocket.close(code=1008)
+        return
     await websocket.accept()
     capture_task: Optional[asyncio.Task] = None
     stop_event   = asyncio.Event()
@@ -307,6 +374,7 @@ async def websocket_endpoint(websocket: WebSocket):
     # FPS is measured once on first open and cached.
     shared_cap: Optional[cv2.VideoCapture] = None
     shared_cap_device: Optional[int] = None
+    shared_cap_req: Optional[tuple] = None   # (width, height, fps) it was opened with
     shared_cap_fps: float = 30.0
     shared_cap_w: int = 1920
     shared_cap_h: int = 1080
@@ -314,16 +382,25 @@ async def websocket_endpoint(websocket: WebSocket):
     loop = asyncio.get_event_loop()
 
     async def _ensure_cap(message: dict):
-        nonlocal shared_cap, shared_cap_device, shared_cap_fps, shared_cap_w, shared_cap_h
+        nonlocal shared_cap, shared_cap_device, shared_cap_req, shared_cap_fps, shared_cap_w, shared_cap_h
         device_raw = message.get("device", 0)
         device = int(device_raw) if str(device_raw).isdigit() else device_raw
         width  = int(message.get("width",  1920))
         height = int(message.get("height", 1080))
         fps    = int(message.get("fps",    30))
-        # Reuse if same device and still open
-        if shared_cap is not None and shared_cap.isOpened() and shared_cap_device == device:
+        req = (width, height, fps)
+        # Reuse the open handle only when it already satisfies the request,
+        # which is true either when the request is identical to the one it was
+        # opened with, or when it is already delivering the requested size.
+        # The second case matters for SDI cards: they lock to the incoming
+        # signal and ignore the requested size, so start_preview (which asks
+        # for the 1920x1080 default) and start_live_capture (which asks for the
+        # detected size) must not force a 2-4 s DirectShow reopen between them.
+        if (shared_cap is not None and shared_cap.isOpened()
+                and shared_cap_device == device
+                and (shared_cap_req == req or (width, height) == (shared_cap_w, shared_cap_h))):
             return shared_cap
-        # Close old cap if different device
+        # Close old cap if a different device or format is needed
         if shared_cap is not None:
             await loop.run_in_executor(_executor, shared_cap.release)
         cap = await loop.run_in_executor(
@@ -332,12 +409,14 @@ async def websocket_endpoint(websocket: WebSocket):
         if cap is None or not cap.isOpened():
             shared_cap = None
             shared_cap_device = None
+            shared_cap_req = None
             return None
         # Measure fps once here so preview/capture never need to do it
         shared_cap_w, shared_cap_h = await loop.run_in_executor(_executor, read_actual_size, cap)
         shared_cap_fps = await loop.run_in_executor(_executor, read_actual_fps, cap)
         shared_cap = cap
         shared_cap_device = device
+        shared_cap_req = req
         return shared_cap
 
     try:
