@@ -535,7 +535,7 @@ export default function GuidedCapture({ ws, boardSettings, onCalibrationSent, on
             setCalibratingZoom(true);
             socket.send(JSON.stringify({
               action: 'calibrate_zoom',
-              fl_groups: readyGroups.map(g => ({ focal_length_mm: g.fl_mm, frames: g.frames })),
+              fl_groups: readyGroups.map(g => ({ focal_length_mm: g.fl_mm, frames: g.frames, working_distance_mm: g.working_distance_mm || 0 })),
               board_cols: currentBoardSettings.cols, board_rows: currentBoardSettings.rows,
               square_size_mm: currentBoardSettings.squareSizeMm, image_size: imageSize,
               sensor_width_mm: parseFloat(currentCameraSettings.sensorWidthMm) || 0,
@@ -665,10 +665,15 @@ export default function GuidedCapture({ ws, boardSettings, onCalibrationSent, on
 
   const addFl = (fl: number) => {
     if (isNaN(fl) || fl <= 0 || flGroups.some(g => g.fl_mm === fl)) return;
+    // Sorting shifts array indices — remember the active group's FL and
+    // re-resolve its index afterwards so the selection stays on the same group.
+    const activeFl = activeFlIdx !== null ? flGroups[activeFlIdx]?.fl_mm ?? null : null;
     const updated = [...flGroups, { fl_mm: fl, frames: [], status: 'pending' as const, working_distance_mm: 0 }].sort((a, b) => a.fl_mm - b.fl_mm);
     setFlGroups(updated);
-    // Auto-select the new FL if nothing is currently selected
-    if (activeFlIdx === null) {
+    if (activeFl !== null) {
+      setActiveFlIdx(updated.findIndex(g => g.fl_mm === activeFl));
+    } else {
+      // Auto-select the new FL if nothing is currently selected
       setActiveFlIdx(updated.findIndex(g => g.fl_mm === fl));
     }
   };
@@ -1190,14 +1195,18 @@ export default function GuidedCapture({ ws, boardSettings, onCalibrationSent, on
                       <div className="flex items-center gap-2 rounded-lg bg-emerald-500/10 border border-emerald-500/30 px-3 py-2">
                         <div className="w-4 h-4 border-2 border-emerald-400 border-t-transparent rounded-full animate-spin shrink-0" />
                         <p className="text-sm font-semibold text-emerald-300">
-                          Hold still — {Math.round(liveFrame.hold_progress * 100)}% — capturing…
+                          {MANUAL_ONLY_CAPTURE
+                            ? 'Ready — press Capture'
+                            : `Hold still — ${Math.round(liveFrame.hold_progress * 100)}% — capturing…`}
                         </p>
                       </div>
                     )}
                     {allOk && !holdFilling && (
                       <div className="flex items-center gap-2 rounded-lg bg-emerald-500/10 border border-emerald-500/30 px-3 py-2">
                         <span className="text-emerald-400 font-bold shrink-0">✓</span>
-                        <p className="text-sm font-semibold text-emerald-300">All good — press Capture or hold still</p>
+                        <p className="text-sm font-semibold text-emerald-300">
+                          {MANUAL_ONLY_CAPTURE ? 'All good — press Capture' : 'All good — press Capture or hold still'}
+                        </p>
                       </div>
                     )}
                   </div>

@@ -221,16 +221,15 @@ def _score_image(img: np.ndarray, gray: np.ndarray, w: int, h: int, checkerboard
 def _make_charuco_board(checkerboard_size: tuple):
     """Create a ChArUco board matching the Sony calibration target.
 
-    Sony board has 8×6 squares with ArUco markers in each square.
-    If checkerboard_size is (9, 6) meaning 9×6 inner corners,
-    that corresponds to an 8×6 board (where board = corners + 1 on each axis).
+    checkerboard_size is (cols, rows) of *inner corners*; a ChArUco board with
+    N×M squares has (N-1)×(M-1) inner corners, so squares = corners + 1.
     """
     if not hasattr(cv2, "aruco"):
         return None
     try:
         cols, rows = int(checkerboard_size[0]), int(checkerboard_size[1])
-        squares_x = cols  # 8 for Sony (was cols+1 before, but Sony is directly 8×6)
-        squares_y = rows  # 6 for Sony
+        squares_x = cols + 1
+        squares_y = rows + 1
         square_len = 1.0
         marker_len = 0.8
         # Use DICT_5X5_100 which matches Sony board (5-bit ArUco codes)

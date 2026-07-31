@@ -478,13 +478,7 @@ def export_ue5_ulens_zoom(
             return {"success": False, "output_path": path,
                     "error": "No valid focal-length results to export"}
 
-        fl_min   = calibrated[0]["focal_length_mm"]
-        fl_max   = calibrated[-1]["focal_length_mm"]
-        fl_range = max(fl_max - fl_min, 1.0)
         focus_enc = 0.0
-
-        def ze(fl_mm: float) -> float:
-            return round((fl_mm - fl_min) / fl_range, 6)
 
         # Merge calibrated + interpolated rows, sorted by FL.
         # Interpolated rows carry pre-computed fx_px/fy_px/cx_px/cy_px and
@@ -493,6 +487,15 @@ def export_ue5_ulens_zoom(
         if fl_interpolated:
             all_rows += fl_interpolated
         all_rows.sort(key=lambda r: r["focal_length_mm"])
+
+        # Normalise ZoomEncoder over the full merged range — interpolated rows
+        # may extend beyond the calibrated FLs, and encoder values must stay in [0, 1].
+        fl_min   = all_rows[0]["focal_length_mm"]
+        fl_max   = all_rows[-1]["focal_length_mm"]
+        fl_range = max(fl_max - fl_min, 1.0)
+
+        def ze(fl_mm: float) -> float:
+            return round((fl_mm - fl_min) / fl_range, 6)
 
         fl_rows, ic_rows, nd_rows, dist_rows = [], [], [], []
 

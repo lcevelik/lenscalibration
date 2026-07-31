@@ -177,7 +177,10 @@ def main() -> None:
             print(f"  {fl:>6.0f}mm  FAILED  {r.get('error', '')}")
             continue
         key = str(int(fl)) if fl == int(fl) else f"{fl:.1f}"
-        nz  = nodal.get(key, 0.0)
+        # Entries are {"tx","ty","tz"} dicts; tolerate the older plain-float
+        # form so a calibration JSON saved by an earlier build still prints.
+        entry = nodal.get(key)
+        nz = float(entry.get("tz", 0.0)) if isinstance(entry, dict) else float(entry or 0.0)
         print(
             f"  {fl:>6.0f}mm  {rms:>6.2f}px  {r.get('confidence','?'):<12}"
             f"  {r.get('used_frames',0):>6}  {r.get('fx_px',0):>8.1f}  {r.get('fy_px',0):>8.1f}"

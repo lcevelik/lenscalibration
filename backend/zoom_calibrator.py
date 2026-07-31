@@ -73,9 +73,14 @@ def _fit_or_pchip(fls: np.ndarray, values: np.ndarray, model, query: np.ndarray,
     try:
         popt, _ = curve_fit(model, fls, values, maxfev=4000)
         fitted = model(query, *popt)
-        # Sanity-check residuals on the known points
+        # Sanity-check residuals on the known points. The tolerance scales with
+        # the *spread* of the values, not their magnitude: an absolute floor
+        # (e.g. 0.5) accepts any fit for small-magnitude parameters like
+        # distortion coefficients, while keying off magnitude would accept a
+        # ~100px error on a principal point that only drifts a few px.
         residuals = np.abs(model(fls, *popt) - values)
-        if np.max(residuals) < max(np.std(values) * 0.15 + 1e-9, 0.5):
+        value_spread = float(np.ptp(values))
+        if np.max(residuals) < max(np.std(values) * 0.15, value_spread * 0.05, 1e-9):
             return fitted
     except Exception:
         pass
@@ -401,11 +406,6 @@ def run_zoom_calibration(
 
         optical_centers.append(mean_center)
 
-        # Track best K for fallback use in subsequent (harder) FL groups
-        if K_best is None or rms < (fl_results[-1].get("rms") or float("inf") if fl_results else float("inf")):
-            K_best = cam_mtx.copy()
-            D_best = dist_c.copy()
-
         # ── Per-image reprojection errors ──────────────────────────────────
         pie = []
         for i, (obj, img, rv, tv) in enumerate(
@@ -442,13 +442,12 @@ def run_zoom_calibration(
             "error":                    None,
         })
 
-        # Update K_best tracking after appending result
+        # Track lowest-RMS K/D for pose-only fallback at subsequent (harder) FLs
         valid_so_far = [r for r in fl_results if r.get("rms") is not None]
-        if valid_so_far:
-            best = min(valid_so_far, key=lambda r: r["rms"])
-            if best["focal_length_mm"] == fl_mm:
-                K_best = cam_mtx.copy()
-                D_best = dist_c.copy()
+        best = min(valid_so_far, key=lambda r: r["rms"])
+        if best["focal_length_mm"] == fl_mm:
+            K_best = cam_mtx.copy()
+            D_best = dist_c.copy()
 
     # ── Nodal offsets: Z-shift vs the best-calibrated FL ──────────────────
     valid = [(i, c) for i, c in enumerate(optical_centers) if c is not None]

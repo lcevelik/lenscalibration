@@ -486,7 +486,9 @@ export default function App() {
           setScanning(false);
           const auto = (msg.devices as CaptureDevice[]).find(d => d.brand.is_capture_card)
                     ?? (msg.devices as CaptureDevice[])[0];
-          if (auto != null) setSelectedIdx(auto.index);
+          // Only auto-select when the user hasn't picked a device yet — a
+          // re-scan must not override an explicit selection.
+          if (auto != null) setSelectedIdx(prev => prev == null ? auto.index : prev);
         } else if (msg.action === 'preview_started' || msg.action === 'live_capture_started') {
           if (msg.actual_width)  setDetectedW(msg.actual_width);
           if (msg.actual_height) setDetectedH(msg.actual_height);
