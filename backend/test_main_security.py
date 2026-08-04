@@ -54,6 +54,7 @@ class TestOriginAllowlist:
         "http://10.0.0.5:5173",
         "http://172.16.4.9:5173",
         "http://172.31.255.254",     # upper edge of the private 172.16/12 block
+        "http://100.103.214.14:5173", # shared-address-space / CGNAT remote access
     ])
     def test_allowed(self, origin):
         assert main._is_allowed_origin(origin) is True

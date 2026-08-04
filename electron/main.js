@@ -110,8 +110,8 @@ async function createWindow() {
   });
 
   localIp = getLocalIP();
-  const devUrl = `http://${localIp}:5173`;
-  console.log(`\n📱 Remote access: http://${localIp}:5173\n`);
+  const devUrl = 'http://127.0.0.1:5173';
+  console.log('\n📱 Dev UI: http://127.0.0.1:5173\n');
 
   if (app.isPackaged) {
     win.loadFile(path.join(__dirname, '..', 'frontend', 'dist', 'index.html'));

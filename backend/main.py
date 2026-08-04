@@ -28,9 +28,18 @@ _ALLOWED_ORIGINS = [
     "http://localhost:5173", "http://127.0.0.1:5173",
     "http://localhost:3000", "http://127.0.0.1:3000",
 ]
-# The dev server may be reached via a LAN IP (phone remote access) —
-# allow private-network origins only, never the wildcard.
-_PRIVATE_ORIGIN_RE = r"^http://(10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)(:\d+)?$"
+# The dev server may be reached via local/private IPs and carrier-grade NAT
+# addresses used by remote access. Keep the policy scoped to non-public ranges
+# and never allow the wildcard.
+_PRIVATE_ORIGIN_RE = (
+    r"^http://("
+    r"10\.\d+\.\d+\.\d+|"
+    r"100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d+\.\d+|"
+    r"169\.254\.\d+\.\d+|"
+    r"192\.168\.\d+\.\d+|"
+    r"172\.(1[6-9]|2\d|3[01])\.\d+\.\d+"
+    r")(?:\:\d+)?$"
+)
 
 app = FastAPI()
 app.add_middleware(
